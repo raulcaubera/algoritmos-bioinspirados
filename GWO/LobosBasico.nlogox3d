@@ -26,6 +26,7 @@ globals [
 patches-own [
   elevation     ;; valor FITNESS asociado a cada parcela (patch)
 ]
+turtles-own [ fitness ]  ;; fitness de cada particula
 
 
 
@@ -38,6 +39,22 @@ to-report objective-function [x y]
 end
 
 
+;; --------- Helpers para min/max según el modo ---------
+to-report better? [a b]
+  ;; Si random-search-space => maximizamos; si no => minimizamos
+  ifelse random-search-space
+  [ report a > b ]
+  [ report a < b ]
+end
+
+to-report worst-sentinel
+  ;; Sentinela inicial: muy malo, depende de si maximizas o minimizas
+  ifelse random-search-space
+  [ report -1e+20 ]   ;; para maximizar
+  [ report  1e+20 ]   ;; para minimizar
+end
+
+
 to setup
 
   clear-all
@@ -45,7 +62,6 @@ to setup
   set max-ticks ceiling (evaluation-budget / population-size)
   set max-ticks max list 50 min list max-ticks 2000
 
-  ask patches [set elevation 0]
 
   ask patches [set elevation 0]
   ifelse random-search-space
@@ -60,7 +76,6 @@ to setup
   draw-search-space
   initialize-particles
   set-observer-position
-
   reset-ticks
 end
 
@@ -87,10 +102,20 @@ to create-random-search-space
   ;; Suavizar espacio de busqueda segun
   repeat landscape-smoothness [ diffuse elevation 1]
 
-  ask max-one-of patches [elevation]
-  [
-    set true-best-patch self
-  ]
+  
+  ifelse random-search-space [
+      ask max-one-of patches [elevation] [ set true-best-patch self ]
+    ] [
+      ask min-one-of patches [elevation] [ set true-best-patch self ]
+    ]
+
+  
+;    ask min-one-of patches [elevation] 
+;    ask max-one-of patches [elevation]
+;  [
+;    set true-best-patch self
+;  ]
+  
 end
 
 
@@ -98,10 +123,14 @@ end
 to-report get-elevation
 
   ifelse random-search-space
-  
     ;; Aproximamos las coordenadas de la partícula actual porque no conocemos
     ;; la función de FITNESS, pero conocemos la elevación aleatoria dada.
-    [report [elevation] of (patch (int xcor) (int ycor) 0)]
+    [
+    let ix max list min-pxcor (min list max-pxcor round xcor)
+    let iy max list min-pxcor (min list max-pxcor round ycor)
+    report [elevation] of patch ix iy 0
+;    report [elevation] of (patch (int xcor) (int ycor) 0)
+    ]
 
     ;; En caso de que no utilizar espacio de búsqueda aleatorio, devolvemos el valor de FITNESS exacto
     [report objective-function xcor ycor]
@@ -113,7 +142,7 @@ end
 to draw-search-space
 
   ;; Valor maximo de la funcion objetivo
-  let max-elevation max [elevation] of patches
+  let max-elevation max [elevation] of patches with [pzcor = 0]
 
   ;; Creamos los puntos sobre el espacio para vincularlos
   ask patches with [pzcor = 0]
@@ -132,6 +161,7 @@ to draw-search-space
   ]
 end
 
+
 ;; Inicializar particulas en el espacio de busqueda
 to initialize-particles
 
@@ -142,10 +172,11 @@ to initialize-particles
     setxy random-xcor random-ycor
 
     let z-elevation get-elevation
-    let max-elevation max [elevation] of patches
-    set zcor (z-elevation / max-elevation) * max-pzcor
+    set fitness z-elevation
+    let max-elev max [elevation] of patches with [pzcor = 0]
+    set zcor (z-elevation / max-elev) * max-pzcor
 
-    set elevation z-elevation
+;    set elevation z-elevationation
 
     ; aspecto (forma, color y tamaño) de la particula
     set color red
@@ -159,22 +190,30 @@ end
 to update-alpha-beta-delta
 
   ;; inicializar valores de alpha, beta y delta
-  ;; valores altos para garantizar que cualquier solución será mejor que éstos
-  set alpha-val 1e+20
-  set beta-val 1e+20
-  set delta-val 1e+20
+  ;; valores altos para garantizar que cualquier solución será mejor que éstos, sentinelas coherentes con el modo
+  
+  set alpha-val worst-sentinel
+  set beta-val  worst-sentinel
+  set delta-val worst-sentinel
+
+;  set alpha-val 1e+20
+;  set beta-val 1e+20
+;  set delta-val 1e+20
 
   ask particles [
 
     ;; Obtener el valor de la función objetivo en la posición actual
-    let current-elevation get-elevation
-    set elevation current-elevation
+    let current-fitness get-elevation
+    set fitness current-fitness
+
+;    let current-elevation get-elevation
+;    set elevation current-elevation
 
     ;; Actualización jerárquica de lso 3 mejores
     ;; Se determina qué lobo es alpha, beta o delta
 
     ;; Caso 1: el lobo actual es mejor que el alpha
-    ifelse elevation < alpha-val [
+    ifelse (better? fitness alpha-val) [
       ;; El antiguo beta pasa a ser delta
       set delta-val beta-val
       set delta-x beta-x
@@ -186,33 +225,50 @@ to update-alpha-beta-delta
       set beta-y alpha-y
 
       ;; El lobo actual se convierte en el nuevo alpha
-      set alpha-val elevation
+      set alpha-val fitness
       set alpha-x xcor
       set alpha-y ycor
-    ] [
+    ] [ 
       ;; Caso 2: el lobo no es mejor que alpha, pero puede ser mejor que beta
 
-      ifelse elevation < beta-val [
+      ifelse (better? fitness beta-val) [
         ;; El antiguo beta pasa a ser delta
         set delta-val beta-val
         set delta-x beta-x
         set delta-y beta-y
 
         ;; El lobo actual se convierte en beta
-        set beta-val elevation
+        set beta-val fitness
         set beta-x xcor
         set beta-y ycor
-      ] [
+      ] [ 
         ;; Caso 3: el lobo no es ni alpha ni beta, pero puede ser mejor que delta
-        if elevation < delta-val [
+        if (better? fitness delta-val) [
           ;; El lobo actual se convierte en delta
-          set delta-val elevation
+          set delta-val fitness
           set delta-x xcor
           set delta-y ycor
         ]
       ]
     ]
   ]
+    
+   ;; Por robustez por si hay muy pocos candidatos en primeras iteraciones, replica alpha en beta  y delta:
+    
+    if (beta-val = worst-sentinel) [
+      set beta-val alpha-val
+      set beta-x alpha-x
+      set beta-y alpha-y
+    ]
+    if (delta-val = worst-sentinel) [
+      set delta-val beta-val
+      set delta-x beta-x
+      set delta-y beta-y
+    ]
+
+    
+    
+  
 end
 
 
@@ -233,7 +289,8 @@ to go
 
   ;; Cálculo del parámetro a, que decrece linealmente de 2 a 0
   ;; Este parámetro controla la transición entre exploración y explotación
-  let a 2 * (1 - ticks / max-ticks)
+  let a 2 * (1 - (ticks / (max-ticks * 1.0)))
+;  let a 2 * (1 - ticks / max-ticks)
 
   ;; Actualización de la posición de cada lobo
   ask particles [
@@ -246,43 +303,59 @@ to go
     ;; Influencia del lobo alfa (mejor solución)
     
     ;; Generación de coeficientes aleatorios
-    let r1a random-float 1
-    let r2a random-float 1
-    let A1 (2 * a * r1a) - a
-    let C1 2 * r2a
+    let r1ax random-float 1
+    let r2ax random-float 1
+    let A1x ((2 * a * r1ax) - a)
+    let C1x (2 * r2ax)
+
+    let r1ay random-float 1
+    let r2ay random-float 1
+    let A1y ((2 * a * r1ay) - a)
+    let C1y (2 * r2ay)
+
 
     ;; Cálculo de la distancia al alfa
-    let dx-alpha abs (C1 * alpha-x - x)
-    let dy-alpha abs (C1 * alpha-y - y)
+    let dx-alpha abs (C1x * alpha-x - x)
+    let dy-alpha abs (C1y * alpha-y - y)
 
     ;; Posición candidata basada en el alfa
-    let X1 alpha-x - A1 * dx-alpha
-    let Y1 alpha-y - A1 * dy-alpha
+    let X1 alpha-x - A1x * dx-alpha
+    let Y1 alpha-y - A1y * dy-alpha
 
     ;; Influencia del lobo beta (segunda mejor solución)
 
-    let r1b random-float 1
-    let r2b random-float 1
-    let A2 (2 * a * r1b) - a
-    let C2 2 * r2b
+    let r1bx random-float 1
+    let r2bx random-float 1
+    let A2x ((2 * a * r1bx) - a)
+    let C2x (2 * r2bx)
 
-    let dx-beta abs (C2 * beta-x - x)
-    let dy-beta abs (C2 * beta-y - y)
+    let r1by random-float 1
+    let r2by random-float 1
+    let A2y ((2 * a * r1by) - a)
+    let C2y (2 * r2by)
 
-    let X2 beta-x - A2 * dx-beta
-    let Y2 beta-y - A2 * dy-beta
+    let dx-beta abs (C2x * beta-x - x)
+    let dy-beta abs (C2y * beta-y - y)
+
+    let X2 beta-x - A2x * dx-beta
+    let Y2 beta-y - A2y * dy-beta
 
     ;; Influencia del lobo delta (tercera mejor solución)
-    let r1c random-float 1
-    let r2c random-float 1
-    let A3 (2 * a * r1c) - a
-    let C3 2 * r2c
+    let r1cx random-float 1
+    let r2cx random-float 1
+    let A3x ((2 * a * r1cx) - a)
+    let C3x (2 * r2cx)
 
-    let dx-delta abs (C3 * delta-x - x)
-    let dy-delta abs (C3 * delta-y - y)
+    let r1cy random-float 1
+    let r2cy random-float 1
+    let A3y ((2 * a * r1cy) - a)
+    let C3y (2 * r2cy)
+       
+    let dx-delta abs (C3x * delta-x - x)
+    let dy-delta abs (C3y * delta-y - y)
 
-    let X3 delta-x - A3 * dx-delta
-    let Y3 delta-y - A3 * dy-delta
+    let X3 delta-x - A3x * dx-delta
+    let Y3 delta-y - A3y * dy-delta
 
     ;; Actualización de la posición final del lobo
     ;; Se calcula como el promedio de las posiciones
@@ -291,12 +364,24 @@ to go
     let new-x (X1 + X2 + X3) / 3
     let new-y (Y1 + Y2 + Y3) / 3
 
-    setxy new-x new-y
+    ;; Evitar salirse del mundo
+    let cx max list min-pxcor (min list max-pxcor new-x)
+    let cy max list min-pxcor (min list max-pxcor new-y)
+
+    setxy cx cy
 
     ;; Actualización de coordenada para visualización
+;    let z-elevationation get-elevation
+;    let max-elevation max [elevation] of patches with [pzcor = 0]
+;    set zcor (z-elevationation / max-elevation) * max-pzcor
+   
+    
     let z-elevation get-elevation
-    let max-elevation max [elevation] of patches
-    set zcor (z-elevation / max-elevation) * max-pzcor
+    set fitness z-elevation
+    let max-elev max [elevation] of patches with [pzcor = 0]
+    set zcor (z-elevation / max-elev) * max-pzcor
+
+    
   ]
 
   if not trace-mode [ clear-drawing ]
@@ -309,10 +394,10 @@ end
     <button x="240" y="174" height="44" disableUntilTicks="false" forever="true" kind="Observer" width="124" display="EJECUTAR GWO">go</button>
     <switch x="26" y="71" height="40" on="true" variable="random-search-space" width="175" display="random-search-space"></switch>
     <button x="241" y="120" height="46" disableUntilTicks="false" forever="false" kind="Observer" width="106" display="STEP by STEP">go</button>
-    <slider x="381" step="1" y="48" max="100" width="174" display="population-size" height="50" min="1" direction="Horizontal" default="12.0" variable="population-size"></slider>
+    <slider x="381" step="1" y="48" max="100" width="174" display="population-size" height="50" min="1" direction="Horizontal" default="43.0" variable="population-size"></slider>
     <slider x="383" step="5000" y="230" max="100000" width="172" display="evaluation-budget" height="50" min="10000" direction="Horizontal" default="75000.0" variable="evaluation-budget"></slider>
-    <slider x="26" step="1" y="128" max="20" width="176" display="landscape-smoothness" height="50" min="4" direction="Horizontal" default="11.0" variable="landscape-smoothness"></slider>
-    <slider x="26" step="1" y="191" max="50" width="178" display="hills-number" height="50" min="1" direction="Horizontal" default="13.0" variable="hills-number"></slider>
+    <slider x="26" step="1" y="128" max="20" width="176" display="landscape-smoothness" height="50" min="4" direction="Horizontal" default="5.0" variable="landscape-smoothness"></slider>
+    <slider x="26" step="1" y="191" max="50" width="178" display="hills-number" height="50" min="1" direction="Horizontal" default="29.0" variable="hills-number"></slider>
     <plot x="138" autoPlotX="true" yMax="10.0" autoPlotY="true" yAxis="fitness" y="353" xMin="0.0" height="216" legend="true" xMax="10.0" yMin="0.0" width="317" xAxis="iteration" display="plot 1">
       <setup></setup>
       <update></update>
