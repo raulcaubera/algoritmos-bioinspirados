@@ -486,11 +486,13 @@ Si la opción de espacio de búsqueda aleatorio está habilitada, se genera un p
 
 Pulse PASO (para una iteración) o IR para ejecutar el algoritmo de optimización de Grey Wolf.
 
-El control deslizante PAISAJE-SUAVIZACIÓN controla la suavidad del paisaje generado aleatoriamente.
+El control deslizante LANDSCAPE-SMOOTHNESS controla la suavidad del paisaje generado aleatoriamente.
 
-El control deslizante COLINAS-NÚMERO determina cuántas parcelas reciben valores altos de elevación, creando colinas en el espacio de búsqueda aleatorio.
+El control deslizante HILLS-NUMBER determina cuántas parcelas reciben valores altos de elevación, creando colinas en el espacio de búsqueda aleatorio.
 
-El control deslizante POBLACIÓN-TAMAÑO controla el número de lobos utilizados en la optimización.
+El control deslizante POPULATION-SIZE controla el número de lobos utilizados en la optimización.
+
+El control deslizante EVALUATION-BUDGET es el número máximo de evaluaciones de la función objetivo que se permite al algoritmo durante una ejecución.
 
 El interruptor TRACE-MODE activa o desactiva la visualización de las rutas seguidas por los lobos.
 
@@ -512,6 +514,8 @@ Intente cambiar el control deslizante POBLATION-SIZE.
 Con una población pequeña, el algoritmo puede converger más rápido, pero es más probable que se quede estancado en los mínimos locales.
 
 Con una población mayor, la exploración mejora, pero la convergencia puede tardar más.
+
+Modificando el control EVALUATION-BUDGET (número máximo de evaluaciones) tambien se puede observar como influye. Calcula cuántas iteraciones puede hacer en función del tamaño de la población: a mayor presupuesto, más tiempo de búsqueda; a mayor población, menos iteraciones con el mismo presupuesto.
 
 También puede intentar activar la opción de búsqueda aleatoria en el espacio para observar el comportamiento de los lobos en paisajes más complejos.
 
