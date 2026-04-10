@@ -1,0 +1,2563 @@
+<?xml version="1.0" encoding="utf-8"?>
+<model version="NetLogo 3D 7.0.3" snapToGrid="false">
+  <code><![CDATA[;; --- MODELO ESTRUCTURAL 72-BAR ---
+;; Geometría, conectividad, apoyos y casos de carga
+;; Reproduce el benchmark clásico de la literatura (Kaveh et al.)
+
+
+;Slider stress-limit límite de tensión admisible en psi.
+;Slider displacement-limit límite de desplazamiento admisible en pulgadas
+;Slider young-modulus módulo de elasticidad E, en psi
+;Slider density densidad del material, en lb/in³
+
+breed [ particles particle ]
+
+globals [
+  g-best-vars          ;; mejor solucion global: lista de 16 variables
+  g-best-val           ;; mejor fitness global
+  max-ticks            ;; numero maximo de iteraciones realmente usado
+
+  sections             ;; lista de secciones discretas disponibles
+  number-of-groups     ;; numero de variables de diseño (16)
+  section-count        ;; numero de secciones discretas (64)
+  section-min          ;; area minima disponible
+  section-max          ;; area maxima disponible
+
+  best-weight          ;; peso sin penalizar de la mejor solucion
+  best-penalty         ;; penalizacion de la mejor solucion
+  
+  member-group-limits  ;; rangos de barras 
+  
+  node-coords           ;; coordenadas de los 20 nodos
+  member-connectivity   ;; conectividad de las 72 barras
+  member-lengths        ;; longitud de cada barra
+  support-node-ids      ;; nodos apoyados
+  load-case-1           ;; caso de carga 1 del PDF
+  load-case-2           ;; caso de carga 2 del PDF
+
+  total-dofs            ;; numero total de grados de libertad
+  restrained-dofs       ;; lista de dofs restringidos por los apoyos
+  free-dofs             ;; lista de dofs libres
+  
+  top-node-ids          ;; nodos superiores 17–20
+  
+  
+  debug-mode?          ;; activa o desactiva mensajes de depuracion
+  debug-every          ;; cada cuantos ticks imprimir resumen
+  
+  last-printed-best
+  
+  benchmark-72bar-design
+  benchmark-72bar-weight
+
+]
+
+particles-own [
+  vars                 ;; solucion actual de la particula: lista de 16 variables
+  p-best-vars          ;; mejor solucion personal
+  p-best-val           ;; mejor fitness personal
+  current-val          ;; fitness actual
+]
+
+
+
+;; INICIALIZACION
+to setup
+  clear-all
+  reset-ticks
+  
+  set-problem-constants
+  set-sections
+  build-72bar-model
+
+  set max-ticks max-iterations
+
+  initialize-particles
+  initialize-global-best
+
+  set-current-plot "Convergencia"
+  clear-plot
+
+  ;set debug-mode? true
+  set debug-mode? false
+  set debug-every 10
+  set last-printed-best 1.0E+20
+  
+ 
+  
+end
+
+
+;; 72-bar: 16 grupos y 64 secciones discretas entre 0.111 y 33.5 in
+to set-problem-constants
+  ;; datos estructurales fijos del benchmark
+  set number-of-groups 16
+  set section-count 64
+  set section-min 0.111
+  set section-max 33.5
+
+  ;; valores auxiliares para monitores
+  set best-weight 0
+  set best-penalty 0
+  
+  set member-group-limits [
+    [1 4]
+    [5 12]
+    [13 16]
+    [17 18]
+    [19 22]
+    [23 30]
+    [31 34]
+    [35 36]
+    [37 40]
+    [41 48]
+    [49 52]
+    [53 54]
+    [55 58]
+    [59 66]
+    [67 70]
+    [71 72]
+  ]
+  
+  ;; 20 nodos y cada nodo de una celosía espacial tiene 3 DOFs (x, y, z), así que en total son 60
+  set total-dofs 60
+  
+  ;;;; nodos superiores 17–20
+  set top-node-ids [17 18 19 20]
+    
+  
+  ;; Diseño benchmark publicado en la Tabla 4.5 para WOA / EWOA
+  set benchmark-72bar-design [
+    1.99 0.563 0.111 0.111
+    1.228 0.442 0.111 0.111
+    0.563 0.563 0.111 0.111
+    0.196 0.563 0.391 0.563
+  ]
+
+  ;; Peso benchmark publicado
+  set benchmark-72bar-weight 389.33
+end
+
+
+;; Lista fija real de 64 areas discretas del problema
+to set-sections
+
+  set sections [
+    0.111 0.141 0.196 0.250 0.307 0.391 0.442 0.563
+    0.602 0.766 0.785 0.994 1.000 1.228 1.266 1.457
+    1.563 1.620 1.800 1.990 2.130 2.380 2.620 2.630
+    2.880 2.930 3.090 3.130 3.380 3.470 3.550 3.630
+    3.840 3.870 3.880 4.100 4.220 4.490 4.590 4.800
+    4.970 5.120 5.740 7.220 7.970 8.530 9.300 10.850
+    11.500 13.500 13.900 14.200 15.500 16.000 16.900 18.800
+    19.900 22.000 22.900 24.500 26.500 28.000 30.000 33.500
+  ]
+
+  ;; actualizar metadatos para que todo el modelo quede coherente
+  set section-count length sections
+  set section-min first sections
+  set section-max last sections
+end
+
+
+;;Construir el modelo reconstruido de 72 barras
+to build-72bar-model
+  ;; Reconstruccion consistente del benchmark:
+  ;; 5 niveles, 4 nodos por nivel, planta cuadrada de 120x120 in,
+  ;; 4 modulos verticales de 60 in de altura.
+
+  set node-coords [
+    [0   0   0]
+    [120 0   0]
+    [120 120 0]
+    [0   120 0]
+
+    [0   0   60]
+    [120 0   60]
+    [120 120 60]
+    [0   120 60]
+
+    [0   0   120]
+    [120 0   120]
+    [120 120 120]
+    [0   120 120]
+
+    [0   0   180]
+    [120 0   180]
+    [120 120 180]
+    [0   120 180]
+
+    [0   0   240]
+    [120 0   240]
+    [120 120 240]
+    [0   120 240]
+  ]
+
+  ;; base apoyada
+  set support-node-ids [1 2 3 4]
+
+  ;; dos casos de carga del PDF
+  ;; caso 1: carga vertical en los nodos superiores
+  set load-case-1 [
+    [17 0     0    -5000]
+    [18 0     0    -5000]
+    [19 0     0    -5000]
+    [20 0     0    -5000]
+  ]
+
+  ;; caso 2: carga combinada en el nodo 17
+  set load-case-2 [
+    [17 5000 5000 -5000]
+    [18 0     0     0]
+    [19 0     0     0]
+    [20 0     0     0]
+  ]
+
+  ;; conectividad: 4 modulos de 18 barras = 72 barras
+  set member-connectivity []
+  set member-connectivity sentence member-connectivity (module-members 1)
+  set member-connectivity sentence member-connectivity (module-members 5)
+  set member-connectivity sentence member-connectivity (module-members 9)
+  set member-connectivity sentence member-connectivity (module-members 13)
+
+  ;; calcular longitudes de las 72 barras
+  set member-lengths []
+  let i 0
+  while [i < length member-connectivity] [
+  let conn item i member-connectivity
+  let ni first conn
+  let nj last conn
+  set member-lengths lput (distance-between-nodes ni nj) member-lengths
+  set i i + 1
+  ]
+  set restrained-dofs build-restrained-dofs
+  set free-dofs build-free-dofs
+end
+
+
+;;Miembros de un módulo de 18 barras, la conectividad encaja con el patrón de grupos  (4 / 8 / 4 / 2 repetido cuatro veces) y con el esquema de torre espacial del problema
+to-report module-members [base-node]
+  let lower1 base-node
+  let lower2 (base-node + 1)
+  let lower3 (base-node + 2)
+  let lower4 (base-node + 3)
+
+  let upper1 (base-node + 4)
+  let upper2 (base-node + 5)
+  let upper3 (base-node + 6)
+  let upper4 (base-node + 7)
+
+  report (list
+    ;; 4 verticales
+    (list lower1 upper1)
+    (list lower2 upper2)
+    (list lower3 upper3)
+    (list lower4 upper4)
+
+    ;; 8 diagonales laterales
+    (list lower1 upper2)
+    (list lower2 upper1)
+
+    (list lower2 upper3)
+    (list lower3 upper2)
+
+    (list lower3 upper4)
+    (list lower4 upper3)
+
+    (list lower4 upper1)
+    (list lower1 upper4)
+
+    ;; 4 horizontales del nivel superior
+    (list upper1 upper2)
+    (list upper2 upper3)
+    (list upper3 upper4)
+    (list upper4 upper1)
+
+    ;; 2 diagonales en planta del nivel superior
+    (list upper1 upper3)
+    (list upper2 upper4)
+  )
+end
+
+;;Obtener coordenadas de un nodo
+to-report node-xyz [node-id]
+  report item (node-id - 1) node-coords
+end
+
+;;Distancia entre dos nodos
+to-report distance-between-nodes [ni nj]
+  let p node-xyz ni
+  let q node-xyz nj
+
+  let delta-x ((item 0 q) - (item 0 p))
+  let delta-y ((item 1 q) - (item 1 p))
+  let delta-z ((item 2 q) - (item 2 p))
+
+  report sqrt (delta-x * delta-x + delta-y * delta-y + delta-z * delta-z)
+end
+
+
+;;DOFs de un nodo
+to-report node-dof-indices [node-id]
+  let base (3 * (node-id - 1))
+  report (list base (base + 1) (base + 2))
+end
+
+;;Construir DOFs restringidos
+to-report build-restrained-dofs
+  let result []
+  let i 0
+
+  while [i < length support-node-ids] [
+    let node-id item i support-node-ids
+    let dofs node-dof-indices node-id
+
+    set result sentence result dofs
+    set i i + 1
+  ]
+
+  report result
+end
+
+;;Construir DOFs libres
+to-report build-free-dofs
+  let result []
+  let d 0
+
+  while [d < total-dofs] [
+    if not member? d restrained-dofs [
+      set result lput d result
+    ]
+    set d d + 1
+  ]
+
+  report result
+end
+
+;;Vector global de cargas para un caso
+to-report load-vector-from-case [one-load-case]
+  let force-vector n-values total-dofs [ i -> 0 ]
+  let i 0
+
+  while [i < length one-load-case] [
+    let load-entry item i one-load-case
+
+    let node-id item 0 load-entry
+    let force-x item 1 load-entry
+    let force-y item 2 load-entry
+    let force-z item 3 load-entry
+
+    let dof-list node-dof-indices node-id
+
+    set force-vector (replace-item (item 0 dof-list) force-vector force-x)
+    set force-vector (replace-item (item 1 dof-list) force-vector force-y)
+    set force-vector (replace-item (item 2 dof-list) force-vector force-z)
+
+    set i i + 1
+  ]
+
+  report force-vector
+end
+
+  
+;;Ceros: vector y matriz
+to-report zero-vector [n]
+  report n-values n [ i -> 0 ]
+end
+
+to-report zero-matrix [rows cols]
+  report n-values rows [ r -> n-values cols [ c -> 0 ] ]
+end
+
+;;Reemplazar un valor en una matriz
+to-report matrix-set [mat row-index col-index new-value]
+  let selected-row item row-index mat
+  let updated-row replace-item col-index selected-row new-value
+  report replace-item row-index mat updated-row
+end
+
+
+;;Sumar a una posición concreta de la matriz
+to-report matrix-add [mat row-index col-index increment]
+  let current-value item col-index (item row-index mat)
+  report matrix-set mat row-index col-index (current-value + increment)
+end
+
+
+;;DOFs de un elemento
+to-report element-dof-indices [node-i node-j]
+  report sentence (node-dof-indices node-i) (node-dof-indices node-j)
+end
+
+;;Matriz de rigidez 3D de una barra espacial
+;;formulación estándar de una barra de celosía 3D en coordenadas globales: depende de la longitud, del área, de young-modulus y de los cosenos directores (slider young-modulus)
+to-report element-stiffness-3d [area node-i node-j]
+  let coord-i (node-xyz node-i)
+  let coord-j (node-xyz node-j)
+
+  let x1 item 0 coord-i
+  let y1 item 1 coord-i
+  let z1 item 2 coord-i
+
+  let x2 item 0 coord-j
+  let y2 item 1 coord-j
+  let z2 item 2 coord-j
+
+  let delta-x (x2 - x1)
+  let delta-y (y2 - y1)
+  let delta-z (z2 - z1)
+
+  let elem-length sqrt (delta-x * delta-x + delta-y * delta-y + delta-z * delta-z)
+
+  let cos-x (delta-x / elem-length)
+  let cos-y (delta-y / elem-length)
+  let cos-z (delta-z / elem-length)
+
+  let coeff (young-modulus * area / elem-length)
+
+  report (list
+    (list (coeff * cos-x * cos-x) (coeff * cos-x * cos-y) (coeff * cos-x * cos-z)
+          (- coeff * cos-x * cos-x) (- coeff * cos-x * cos-y) (- coeff * cos-x * cos-z))
+
+    (list (coeff * cos-x * cos-y) (coeff * cos-y * cos-y) (coeff * cos-y * cos-z)
+          (- coeff * cos-x * cos-y) (- coeff * cos-y * cos-y) (- coeff * cos-y * cos-z))
+
+    (list (coeff * cos-x * cos-z) (coeff * cos-y * cos-z) (coeff * cos-z * cos-z)
+          (- coeff * cos-x * cos-z) (- coeff * cos-y * cos-z) (- coeff * cos-z * cos-z))
+
+    (list (- coeff * cos-x * cos-x) (- coeff * cos-x * cos-y) (- coeff * cos-x * cos-z)
+          (coeff * cos-x * cos-x) (coeff * cos-x * cos-y) (coeff * cos-x * cos-z))
+
+    (list (- coeff * cos-x * cos-y) (- coeff * cos-y * cos-y) (- coeff * cos-y * cos-z)
+          (coeff * cos-x * cos-y) (coeff * cos-y * cos-y) (coeff * cos-y * cos-z))
+
+    (list (- coeff * cos-x * cos-z) (- coeff * cos-y * cos-z) (- coeff * cos-z * cos-z)
+          (coeff * cos-x * cos-z) (coeff * cos-y * cos-z) (coeff * cos-z * cos-z))
+  )
+end
+
+
+;;Ensamblar la matriz global del modelo (cogemos las 72 barras, calculamos la rigidez de cada una y la sumamos en la matriz global de tamaño 60 x 60)
+to-report assemble-global-stiffness [design]
+  let member-areas expand-design-to-members design
+  let global-k zero-matrix total-dofs total-dofs
+
+  let elem-index 0
+  while [elem-index < length member-connectivity] [
+    let elem-conn item elem-index member-connectivity
+    let node-i first elem-conn
+    let node-j last elem-conn
+
+    let area item elem-index member-areas
+    let elem-k element-stiffness-3d area node-i node-j
+    let elem-dofs element-dof-indices node-i node-j
+
+    let local-row 0
+    while [local-row < 6] [
+      let global-row item local-row elem-dofs
+
+      let local-col 0
+      while [local-col < 6] [
+        let global-col item local-col elem-dofs
+        let k-value item local-col (item local-row elem-k)
+
+        set global-k matrix-add global-k global-row global-col k-value
+        set local-col local-col + 1
+      ]
+
+      set local-row local-row + 1
+    ]
+
+    set elem-index elem-index + 1
+  ]
+
+  report global-k
+end
+
+;;Extraer un subvector por índices
+to-report subvector-by-indices [full-vector index-list]
+  let result []
+  let idx-pos 0
+
+  while [idx-pos < length index-list] [
+    let dof-index item idx-pos index-list
+    set result lput (item dof-index full-vector) result
+    set idx-pos idx-pos + 1
+  ]
+
+  report result
+end
+
+;;Extraer una submatriz por índices
+to-report submatrix-by-indices [full-matrix index-list]
+  let result []
+  let row-pos 0
+
+  while [row-pos < length index-list] [
+    let row-index item row-pos index-list
+    let full-row item row-index full-matrix
+
+    let reduced-row []
+    let col-pos 0
+
+    while [col-pos < length index-list] [
+      let col-index item col-pos index-list
+      set reduced-row lput (item col-index full-row) reduced-row
+      set col-pos col-pos + 1
+    ]
+
+    set result lput reduced-row result
+    set row-pos row-pos + 1
+  ]
+
+  report result
+end
+
+;;Resolver un sistema lineal por eliminación gaussiana
+to-report gaussian-solve [input-matrix input-vector]
+  let mat input-matrix
+  let vec input-vector
+  let n length vec
+
+  let pivot-row 0
+  while [pivot-row < n] [
+    ;; buscar mejor pivote en la columna actual
+    let best-row pivot-row
+    let best-value abs (item pivot-row (item pivot-row mat))
+
+    let search-row (pivot-row + 1)
+    while [search-row < n] [
+      let candidate abs (item pivot-row (item search-row mat))
+      if candidate > best-value [
+        set best-value candidate
+        set best-row search-row
+      ]
+      set search-row search-row + 1
+    ]
+
+    ;; si la matriz es singular o casi singular
+    if best-value <= 1.0e-12 [
+      report zero-vector n
+    ]
+
+    ;; intercambio de filas si hace falta
+    if best-row != pivot-row [
+      let temp-row item pivot-row mat
+      let swap-row item best-row mat
+      set mat replace-item pivot-row mat swap-row
+      set mat replace-item best-row mat temp-row
+
+      let temp-val item pivot-row vec
+      let swap-val item best-row vec
+      set vec replace-item pivot-row vec swap-val
+      set vec replace-item best-row vec temp-val
+    ]
+
+    ;; normalizar la fila pivote
+    let pivot-value item pivot-row (item pivot-row mat)
+    let pivot-row-list item pivot-row mat
+
+    let col-index pivot-row
+    while [col-index < n] [
+      set pivot-row-list replace-item col-index pivot-row-list ((item col-index pivot-row-list) / pivot-value)
+      set col-index col-index + 1
+    ]
+
+    set mat replace-item pivot-row mat pivot-row-list
+    set vec replace-item pivot-row vec ((item pivot-row vec) / pivot-value)
+
+    ;; eliminar por debajo
+    let elim-row (pivot-row + 1)
+    while [elim-row < n] [
+      let factor item pivot-row (item elim-row mat)
+      let row-list item elim-row mat
+
+      let elim-col pivot-row
+      while [elim-col < n] [
+        set row-list replace-item elim-col row-list ((item elim-col row-list) - factor * (item elim-col pivot-row-list))
+        set elim-col elim-col + 1
+      ]
+
+      set mat replace-item elim-row mat row-list
+      set vec replace-item elim-row vec ((item elim-row vec) - factor * (item pivot-row vec))
+
+      set elim-row elim-row + 1
+    ]
+
+    set pivot-row pivot-row + 1
+  ]
+
+  ;; sustitucion hacia atras
+  let solution zero-vector n
+  let row-index (n - 1)
+
+  while [row-index >= 0] [
+    let row-list item row-index mat
+    let rhs item row-index vec
+
+    let col-index (row-index + 1)
+    while [col-index < n] [
+      set rhs rhs - (item col-index row-list) * (item col-index solution)
+      set col-index col-index + 1
+    ]
+
+    ;; como la diagonal ya esta normalizada a 1
+    set solution replace-item row-index solution rhs
+    set row-index row-index - 1
+  ]
+
+  report solution
+end
+
+
+;;Resolver desplazamientos para un caso de carga
+to-report solve-displacements-for-case [design one-load-case]
+  let global-k assemble-global-stiffness design
+  let full-force load-vector-from-case one-load-case
+
+  let reduced-k submatrix-by-indices global-k free-dofs
+  let reduced-f subvector-by-indices full-force free-dofs
+
+  let reduced-u gaussian-solve reduced-k reduced-f
+
+  let full-u zero-vector total-dofs
+  let i 0
+
+  while [i < length free-dofs] [
+    let dof-index item i free-dofs
+    set full-u replace-item dof-index full-u (item i reduced-u)
+    set i i + 1
+  ]
+
+  report full-u
+end
+
+;;Máximo valor absoluto de un vector
+to-report max-abs-value [vec]
+  let current-max 0
+  let i 0
+
+  while [i < length vec] [
+    let abs-value abs (item i vec)
+    if abs-value > current-max [
+      set current-max abs-value
+    ]
+    set i i + 1
+  ]
+
+  report current-max
+end
+
+
+;;Extraer el vector de desplazamientos de un elemento
+to-report element-displacement-vector [full-u node-i node-j]
+  let dof-list element-dof-indices node-i node-j
+  let result []
+  let i 0
+
+  while [i < length dof-list] [
+    set result lput (item (item i dof-list) full-u) result
+    set i i + 1
+  ]
+
+  report result
+end
+
+
+;;Tensión axial de una barra 3D fórmula estándar de una barra de celosía 3D: la deformación axial se calcula proyectando los desplazamientos en la dirección de la barra, y luego: σ=EL ΔL\sigma = \frac{E}{L}\,\Delta Lσ=LE​ΔL
+to-report element-axial-stress [full-u node-i node-j]
+  let coord-i (node-xyz node-i)
+  let coord-j (node-xyz node-j)
+
+  let x1 item 0 coord-i
+  let y1 item 1 coord-i
+  let z1 item 2 coord-i
+
+  let x2 item 0 coord-j
+  let y2 item 1 coord-j
+  let z2 item 2 coord-j
+
+  let delta-x (x2 - x1)
+  let delta-y (y2 - y1)
+  let delta-z (z2 - z1)
+
+  let elem-length sqrt (delta-x * delta-x + delta-y * delta-y + delta-z * delta-z)
+
+  let cos-x (delta-x / elem-length)
+  let cos-y (delta-y / elem-length)
+  let cos-z (delta-z / elem-length)
+
+  let uelem element-displacement-vector full-u node-i node-j
+
+  let axial-deformation
+    (- cos-x * item 0 uelem
+     - cos-y * item 1 uelem
+     - cos-z * item 2 uelem
+     + cos-x * item 3 uelem
+     + cos-y * item 4 uelem
+     + cos-z * item 5 uelem)
+
+  report (young-modulus / elem-length) * axial-deformation
+end
+
+;;Máxima tensión absoluta de todas las barras en un caso 
+to-report max-abs-stress-for-design [design full-u]
+  let max-stress 0
+  let elem-index 0
+
+  while [elem-index < length member-connectivity] [
+    let elem-conn item elem-index member-connectivity
+    let node-i first elem-conn
+    let node-j last elem-conn
+
+    let stress abs (element-axial-stress full-u node-i node-j)
+
+    if stress > max-stress [
+      set max-stress stress
+    ]
+
+    set elem-index elem-index + 1
+  ]
+
+  report max-stress
+end
+
+;;Máximo desplazamiento en nodos superiores
+to-report max-top-node-displacement [full-u]
+  let max-disp 0
+  let i 0
+
+  while [i < length top-node-ids] [
+    let node-id item i top-node-ids
+    let dofs node-dof-indices node-id
+
+    let ux abs (item (item 0 dofs) full-u)
+    let uy abs (item (item 1 dofs) full-u)
+    let uz abs (item (item 2 dofs) full-u)
+
+    if ux > max-disp [ set max-disp ux ]
+    if uy > max-disp [ set max-disp uy ]
+    if uz > max-disp [ set max-disp uz ]
+
+    set i i + 1
+  ]
+
+  report max-disp
+end
+
+;; en x y
+to-report max-top-node-displacement-xy [full-u]
+  let max-disp 0
+  let i 0
+
+  while [i < length top-node-ids] [
+    let node-id item i top-node-ids
+    let dofs node-dof-indices node-id
+
+    let ux abs (item (item 0 dofs) full-u)
+    let uy abs (item (item 1 dofs) full-u)
+
+    if ux > max-disp [ set max-disp ux ]
+    if uy > max-disp [ set max-disp uy ]
+
+    set i i + 1
+  ]
+
+  report max-disp
+end
+
+
+
+;;======================================================================
+;; VALIDACIÓN DEL MODELO (NO USADO EN LA OPTIMIZACIÓN)
+;; Estos reporters se utilizan únicamente para comprobar:
+;; - Reproducción del benchmark 72-bar
+;; - Correcta aplicación de cargas y restricciones
+;;======================================================================
+
+
+;;reporters de prueba Tamaño de la matriz global
+to-report global-stiffness-dimensions
+  let k assemble-global-stiffness g-best-vars
+  report (list (length k) (length first k))
+end
+
+
+
+;;Reporters de prueba
+to-report case1-displacements
+  report solve-displacements-for-case g-best-vars load-case-1
+end
+
+to-report case2-displacements
+  report solve-displacements-for-case g-best-vars load-case-2
+end
+
+to-report case1-max-displacement
+  report max-abs-value case1-displacements
+end
+
+to-report case2-max-displacement
+  report max-abs-value case2-displacements
+end
+
+;; mas Reporters de prueba
+to-report case1-max-stress
+  let u solve-displacements-for-case g-best-vars load-case-1
+  report max-abs-stress-for-design g-best-vars u
+end
+
+to-report case2-max-stress
+  let u solve-displacements-for-case g-best-vars load-case-2
+  report max-abs-stress-for-design g-best-vars u
+end
+
+to-report case1-top-displacement
+  let u solve-displacements-for-case g-best-vars load-case-1
+  report max-top-node-displacement u
+end
+
+to-report case2-top-displacement
+  let u solve-displacements-for-case g-best-vars load-case-2
+  report max-top-node-displacement u
+end
+
+
+;;REPORTERS Peso real del mejor diseño
+to-report best-real-weight
+  report compute-real-weight g-best-vars
+end
+
+;;reporetes Desplazamientos del mejor diseño en ambos casos
+to-report best-case1-displacements
+  report solve-displacements-for-case g-best-vars load-case-1
+end
+
+to-report best-case2-displacements
+  report solve-displacements-for-case g-best-vars load-case-2
+end
+
+;;reporet Máximo esfuerzo del mejor diseño
+to-report best-case1-max-stress
+  let u best-case1-displacements
+  report max-abs-stress-for-design g-best-vars u
+end
+
+to-report best-case2-max-stress
+  let u best-case2-displacements
+  report max-abs-stress-for-design g-best-vars u
+end
+
+;;reporert Máximo desplazamiento del mejor diseño en los nodos superiores
+to-report best-case1-max-disp
+  let u best-case1-displacements
+  report max-top-node-displacement-xy u
+end
+
+to-report best-case2-max-disp
+  let u best-case2-displacements
+  report max-top-node-displacement-xy u
+end
+
+
+;;repoirtt Violación total del mejor diseño   usa exactamente la misma lógica que ya estás usando dentro de evaluate-design, pero solo para mostrarla en un monitor
+to-report best-total-violation
+  let stress1 best-case1-max-stress
+  let stress2 best-case2-max-stress
+  let disp1 best-case1-max-disp
+  let disp2 best-case2-max-disp
+
+  let violation 0
+
+  if stress1 > stress-limit [
+    set violation violation + ((stress1 - stress-limit) / stress-limit)
+  ]
+
+  if stress2 > stress-limit [
+    set violation violation + ((stress2 - stress-limit) / stress-limit)
+  ]
+
+  if disp1 > displacement-limit [
+    set violation violation + ((disp1 - displacement-limit) / displacement-limit)
+  ]
+
+  if disp2 > displacement-limit [
+    set violation violation + ((disp2 - displacement-limit) / displacement-limit)
+  ]
+
+  report violation
+end
+
+;;Reporter de factibilidad  útil para saber si el mejor diseño actual cumple todo o no
+to-report best-feasible?
+  report (best-total-violation = 0)
+end
+
+;;Violación por tensión, caso 1
+to-report best-stress-violation-case1
+  let stress1 best-case1-max-stress
+  ifelse stress1 > stress-limit
+    [ report ((stress1 - stress-limit) / stress-limit) ]
+    [ report 0 ]
+end
+
+;;Violación por tensión, caso 2
+to-report best-stress-violation-case2
+  let stress2 best-case2-max-stress
+  ifelse stress2 > stress-limit
+    [ report ((stress2 - stress-limit) / stress-limit) ]
+    [ report 0 ]
+end
+
+;;Violación por desplazamiento, caso 1
+to-report best-disp-violation-case1
+  let disp1 best-case1-max-disp
+  ifelse disp1 > displacement-limit
+    [ report ((disp1 - displacement-limit) / displacement-limit) ]
+    [ report 0 ]
+end
+
+;;Violación por desplazamiento, caso 2
+to-report best-disp-violation-case2
+  let disp2 best-case2-max-disp
+  ifelse disp2 > displacement-limit
+    [ report ((disp2 - displacement-limit) / displacement-limit) ]
+    [ report 0 ]
+end
+
+;;Suma de violación por tensión
+to-report best-total-stress-violation
+  report best-stress-violation-case1 + best-stress-violation-case2
+end
+
+;;Suma de violación por desplazamiento
+to-report best-total-disp-violation
+  report best-disp-violation-case1 + best-disp-violation-case2
+end
+
+;;contadores basicos
+to-report model-node-count
+  report length node-coords
+end
+
+to-report model-member-count
+  report length member-connectivity
+end
+
+to-report model-support-count
+  report length support-node-ids
+end
+
+to-report model-top-node-count
+  report length top-node-ids
+end
+
+;;alturas de base y coronacion
+to-report base-node-z-values
+  let result []
+  let i 0
+
+  while [i < length support-node-ids] [
+    let node-id item i support-node-ids
+    let xyz node-xyz node-id
+    set result lput (item 2 xyz) result
+    set i i + 1
+  ]
+
+  report result
+end
+
+to-report top-node-z-values
+  let result []
+  let i 0
+
+  while [i < length top-node-ids] [
+    let node-id item i top-node-ids
+    let xyz node-xyz node-id
+    set result lput (item 2 xyz) result
+    set i i + 1
+  ]
+
+  report result
+end
+
+;;Conteo de barras por grupo, comprueba si la lista member-group-limits encaja con 72 barras
+to-report member-counts-per-group
+  let result []
+  let i 0
+
+  while [i < length member-group-limits] [
+    let current-limits item i member-group-limits
+    let first-id first current-limits
+    let last-id last current-limits
+    set result lput ((last-id - first-id) + 1) result
+    set i i + 1
+  ]
+
+  report result
+end
+
+;;Longitudes redondeadas de las barras, para validar la topología, es muy útil ver qué longitudes aparecen realmente
+to-report rounded-member-lengths
+  let result []
+  let i 0
+
+  while [i < length member-lengths] [
+    let L item i member-lengths
+    ;; redondeo a 3 decimales
+    let rounded-L (precision L 3)
+    set result lput rounded-L result
+    set i i + 1
+  ]
+
+  report result
+end
+
+;;conjunto de longitudes uncias
+to-report unique-member-lengths
+  let unique-list []
+  let lengths rounded-member-lengths
+  let i 0
+
+  while [i < length lengths] [
+    let current-L item i lengths
+    if not member? current-L unique-list [
+      set unique-list lput current-L unique-list
+    ]
+    set i i + 1
+  ]
+
+  report sort unique-list
+  
+end
+
+;;frecuancia de cada longitud
+to-report member-length-frequencies
+  let uniques unique-member-lengths
+  let result []
+  let i 0
+
+  while [i < length uniques] [
+    let target-L item i uniques
+    let count-L 0
+    let j 0
+
+    while [j < length member-lengths] [
+      if (precision (item j member-lengths) 3) = target-L [
+        set count-L count-L + 1
+      ]
+      set j j + 1
+    ]
+
+    set result lput (list target-L count-L) result
+    set i i + 1
+  ]
+
+  report result
+end
+  
+
+to-report benchmark-design-weight-in-my-model
+  report compute-real-weight benchmark-72bar-design
+end
+to-report benchmark-design-fitness-in-my-model
+  report evaluate-design benchmark-72bar-design
+end
+to-report benchmark-case1-displacements
+  report solve-displacements-for-case benchmark-72bar-design load-case-1
+end
+
+to-report benchmark-case2-displacements
+  report solve-displacements-for-case benchmark-72bar-design load-case-2
+end
+to-report benchmark-case1-max-stress
+  let u benchmark-case1-displacements
+  report max-abs-stress-for-design benchmark-72bar-design u
+end
+
+to-report benchmark-case2-max-stress
+  let u benchmark-case2-displacements
+  report max-abs-stress-for-design benchmark-72bar-design u
+end
+to-report benchmark-case1-max-disp
+  let u benchmark-case1-displacements
+  report max-top-node-displacement-xy u
+end
+
+to-report benchmark-case2-max-disp
+  let u benchmark-case2-displacements
+  report max-top-node-displacement-xy u
+end
+
+to-report benchmark-total-violation
+  let stress1 benchmark-case1-max-stress
+  let stress2 benchmark-case2-max-stress
+  let disp1 benchmark-case1-max-disp
+  let disp2 benchmark-case2-max-disp
+
+  let violation 0
+
+  if stress1 > stress-limit [
+    set violation violation + ((stress1 - stress-limit) / stress-limit)
+  ]
+
+  if stress2 > stress-limit [
+    set violation violation + ((stress2 - stress-limit) / stress-limit)
+  ]
+
+  if disp1 > displacement-limit [
+    set violation violation + ((disp1 - displacement-limit) / displacement-limit)
+  ]
+
+  if disp2 > displacement-limit [
+    set violation violation + ((disp2 - displacement-limit) / displacement-limit)
+  ]
+
+  report violation
+end
+to-report benchmark-design-feasible?
+  report (benchmark-total-violation = 0)
+end
+to-report benchmark-weight-error
+  report benchmark-design-weight-in-my-model - benchmark-72bar-weight
+end
+to-report benchmark-weight-error-percent
+  report 100 * (benchmark-design-weight-in-my-model - benchmark-72bar-weight) / benchmark-72bar-weight
+end
+
+;; Desplazamiento máximo en X,Y SOLO del nodo 17
+to-report max-node17-displacement-xy [full-u]
+  let dofs node-dof-indices 17
+  let ux abs (item (item 0 dofs) full-u)
+  let uy abs (item (item 1 dofs) full-u)
+  report max (list ux uy)
+end
+
+to-report benchmark-case1-node17-disp
+  let u benchmark-case1-displacements
+  report max-node17-displacement-xy u
+end
+
+to-report benchmark-case2-node17-disp
+  let u benchmark-case2-displacements
+  report max-node17-displacement-xy u
+end
+
+;; Devuelve (nodo, dispXY) para todos los nodos superiores
+to-report top-node-displacements-xy [full-u]
+  let result []
+  foreach top-node-ids [ nid ->
+    let dofs node-dof-indices nid
+    let ux abs (item (item 0 dofs) full-u)
+    let uy abs (item (item 1 dofs) full-u)
+    set result lput (list nid (max (list ux uy))) result
+  ]
+  report result
+end
+
+to-report benchmark-case2-top-node-disps
+  report top-node-displacements-xy benchmark-case2-displacements
+end
+
+to print-benchmark-comparison
+  show (word
+    "BENCHMARK_PDF_PESO=" benchmark-72bar-weight
+    " | PESO_EN_MI_MODELO=" precision benchmark-design-weight-in-my-model 4
+    " | ERROR=" precision benchmark-weight-error 4
+    " | ERROR_%=" precision benchmark-weight-error-percent 4
+  )
+
+  show (word
+    "FACTIBLE_EN_MI_MODELO=" benchmark-design-feasible?
+    " | VIOL_TOTAL=" precision benchmark-total-violation 6
+  )
+
+  show (word
+    "S1=" precision benchmark-case1-max-stress 4
+    " | S2=" precision benchmark-case2-max-stress 4
+    " | D1=" precision benchmark-case1-max-disp 6
+    " | D2=" precision benchmark-case2-max-disp 6
+  )
+
+  show (word
+    "BENCHMARK_FITNESS_EN_MI_MODELO=" precision benchmark-design-fitness-in-my-model 4
+  )
+end
+
+
+
+;; temporal para comprobar que la expansión funciona
+to-report best-design-expanded
+  report expand-design-to-members g-best-vars
+end
+
+;;=======================================================================
+;;============================ FIN VALIDACIÓN ===========================
+;;=======================================================================
+
+
+
+
+;; Inicializar particulas en el espacio de busqueda
+to initialize-particles
+  ; Crear espacio de busqueda aleatorio 
+  create-particles population-size [
+    set vars random-design
+    set current-val evaluate-design vars
+
+    set p-best-vars vars
+    set p-best-val current-val
+
+    set color red
+    set shape "dot"
+    set size 2
+
+  ]
+end
+
+
+;; mejor global incial
+to initialize-global-best
+  ask min-one-of particles [p-best-val] [
+    set g-best-vars p-best-vars
+    set g-best-val p-best-val
+  ]
+
+  set best-weight g-best-val
+  set best-penalty 0
+end
+
+
+;;cada partícula arranque con una lista de 16 variables, una por grupo de barras
+to-report random-design
+  report n-values number-of-groups [ -> random-section ]
+end
+
+
+to-report random-section
+  report item (random length sections) sections
+end
+
+;;nos deja preparada la estructura para que luego el cálculo real de peso/tensiones/desplazamientos trabaje con 72 elementos reales en vez de solo 16 variables abstractas
+to-report expand-design-to-members [design]
+  let member-areas []
+  let g 0
+
+  while [g < length design] [
+    let area item g design
+    let current-limits item g member-group-limits
+    let start-member first current-limits
+    let end-member last current-limits
+
+    let m start-member
+    while [m <= end-member] [
+      set member-areas lput area member-areas
+      set m m + 1
+    ]
+
+    set g g + 1
+  ]
+
+  report member-areas
+end
+
+;;Peso real de la estructura
+to-report compute-real-weight [design]
+  let member-areas expand-design-to-members design
+  let total-weight 0
+  let i 0
+
+  while [i < length member-areas] [
+    set total-weight total-weight +
+      density * (item i member-areas) * (item i member-lengths)
+    set i i + 1
+  ]
+
+  report total-weight
+end
+
+
+
+;; Función objetivo: minimización del peso con penalización progresiva
+;; Se emplea un enfoque de penalty function, como en los benchmarks del 72-bar:
+;;   fitness = (1 + violation)^p(t) * weight
+;; donde p(t) aumenta con el número de iteraciones
+to-report evaluate-design [design]
+  let weight compute-real-weight design
+
+  let u1 solve-displacements-for-case design load-case-1
+  let u2 solve-displacements-for-case design load-case-2
+
+  let max-stress-1 max-abs-stress-for-design design u1
+  let max-stress-2 max-abs-stress-for-design design u2
+  
+  ;let max-disp-1 max-top-node-displacement u1
+  ;let max-disp-2 max-top-node-displacement u2
+  let max-disp-1 max-top-node-displacement-xy u1
+  let max-disp-2 max-top-node-displacement-xy u2
+
+  let violation 0
+
+  if max-stress-1 > stress-limit [
+    set violation violation + ((max-stress-1 - stress-limit) / stress-limit)
+  ]
+
+  if max-stress-2 > stress-limit [
+    set violation violation + ((max-stress-2 - stress-limit) / stress-limit)
+  ]
+
+  if max-disp-1 > displacement-limit [
+    set violation violation + ((max-disp-1 - displacement-limit) / displacement-limit)
+  ]
+
+  if max-disp-2 > displacement-limit [
+    set violation violation + ((max-disp-2 - displacement-limit) / displacement-limit)
+  ]
+
+  ;; penalizacion tipo benchmark: aumenta durante las iteraciones
+  let penalty-exponent (1.5 + 1.5 * ticks / max-ticks)
+
+  report ((1 + violation) ^ penalty-exponent) * weight
+end
+
+
+;; Actualizar mejores personales y global
+to update-personal-global-best
+  ask particles [
+    set current-val evaluate-design vars
+
+    if current-val < p-best-val [
+      set p-best-val current-val
+      set p-best-vars vars
+    ]
+  ]
+
+  ask min-one-of particles [p-best-val] [
+    if p-best-val < g-best-val [
+      set g-best-val p-best-val
+      set g-best-vars p-best-vars
+    ]
+  ]
+
+  let current-best-weight compute-real-weight g-best-vars
+  set best-weight current-best-weight
+  set best-penalty (g-best-val - current-best-weight)
+end
+
+
+
+;; Redondear una variable a la sección permitida más cercana
+to-report snap-section [value]
+  let nearest first sections
+  let best-diff abs (value - nearest)
+
+  foreach but-first sections [ s ->
+    let d abs (value - s)
+    if d < best-diff [
+      set nearest s
+      set best-diff d
+    ]
+  ]
+
+  report nearest
+end
+
+
+;; Redondear una solución completa (16 variables)
+to-report snap-design [design]
+  let result []
+  let i 0
+
+  while [i < length design] [
+    set result lput (snap-section (item i design)) result
+    set i i + 1
+  ]
+
+  report result
+end
+
+
+;; Movimiento WOA hacia el mejor global
+to-report move-towards-target [current-design target-design A-woa C-woa]
+  let result []
+  let i 0
+
+  while [i < length current-design] [
+    let x item i current-design
+    let t item i target-design
+    set result lput (t - A-woa * abs (C-woa * t - x)) result
+    set i i + 1
+  ]
+
+  report result
+end
+
+;; Movimiento en espiral WOA, el movimiento en espiral se aplica componente a componente para la lista de 16 variables
+to-report spiral-move [current-design target-design b l]
+  let spiral-factor exp (b * l) * cos (360 * l)
+  let result []
+  let i 0
+
+  while [i < length current-design] [
+    let x item i current-design
+    let t item i target-design
+    set result lput (abs (t - x) * spiral-factor + t) result
+    set i i + 1
+  ]
+
+  report result
+end
+
+
+;; Actualizar el plot de convergencia
+to update-convergence-plot
+  set-current-plot "Convergencia"
+
+  set-current-plot-pen "best"
+  plot g-best-val
+
+  set-current-plot-pen "mean"
+  plot mean [current-val] of particles
+end
+
+
+
+;; mostrar en cconslola daots
+to maybe-print-debug
+  if debug-mode? [
+    if g-best-val < last-printed-best [
+      show (word
+        "tick=" ticks
+        " | NUEVO_MEJOR"
+        " | gbest=" precision g-best-val 4
+        " | peso=" precision best-real-weight 4
+        " | pen=" precision best-penalty 4
+        " | viol_total=" precision best-total-violation 6
+        " | viol_sigma=" precision best-total-stress-violation 6
+        " | viol_disp=" precision best-total-disp-violation 6
+        " | factible=" best-feasible?
+        " | s1=" precision best-case1-max-stress 4
+        " | s2=" precision best-case2-max-stress 4
+        " | d1=" precision best-case1-max-disp 6
+        " | d2=" precision best-case2-max-disp 6
+      )
+      set last-printed-best g-best-val
+    ]
+  ]
+end
+
+to print-geometry-validation
+  show (word "NODOS=" model-node-count
+       " | BARRAS=" model-member-count
+       " | APOYOS=" model-support-count
+       " | NODOS_TOP=" model-top-node-count)
+
+  show (word "Z_BASE=" base-node-z-values
+       " | Z_TOP=" top-node-z-values)
+
+  show (word "BARRAS_POR_GRUPO=" member-counts-per-group)
+
+  show (word "LONGITUDES_UNICAS=" unique-member-lengths)
+
+  show (word "FRECUENCIAS_LONGITUD=" member-length-frequencies)
+end
+
+;; resultado final
+to-report g-best-vars-text
+  report (word
+    "A1=" item 0 g-best-vars
+    "  A2=" item 1 g-best-vars
+    "  A3=" item 2 g-best-vars
+    "  A4=" item 3 g-best-vars
+    "  A5=" item 4 g-best-vars
+    "  A6=" item 5 g-best-vars
+    "  A7=" item 6 g-best-vars
+    "  A8=" item 7 g-best-vars
+    "  A9=" item 8 g-best-vars
+    "  A10=" item 9 g-best-vars
+    "  A11=" item 10 g-best-vars
+    "  A12=" item 11 g-best-vars
+    "  A13=" item 12 g-best-vars
+    "  A14=" item 13 g-best-vars
+    "  A15=" item 14 g-best-vars
+    "  A16=" item 15 g-best-vars
+  )
+end
+
+
+
+
+;; FUNCION PRINCIPAL DE OPTIMIZACION SEGUN EL ALGORITMO WOA
+
+to go
+  if ticks >= max-ticks [ stop ]
+
+  ask particles [
+    ;; Parametro a del WOA: baja linealmente de 2 a 0
+    let a 2 * (1 - ticks / max-ticks)
+
+    ;; coeficientes aleatorios
+    let r1 random-float 1
+    let r2 random-float 1
+
+    let A-woa (2 * a * r1) - a
+    let C-woa 2 * r2
+
+    let p random-float 1
+    let new-vars vars
+
+    ;; FASE 1: encerramiento / exploracion
+    if p < 0.5 [
+      ;; explotacion: acercarse al mejor global
+      if abs A-woa < 1 [
+        set new-vars move-towards-target vars g-best-vars A-woa C-woa
+      ]
+
+      ;; exploracion: ir hacia una ballena aleatoria
+      if abs A-woa >= 1 [
+        let rand-whale one-of other particles
+        if rand-whale = nobody [
+          set rand-whale self
+        ]
+        set new-vars move-towards-target vars [vars] of rand-whale A-woa C-woa
+      ]
+    ]
+
+    ;; FASE 2: movimiento en espiral
+    if p >= 0.5 [
+      let b woa-spiral-b
+      let l (random-float 2) - 1
+      set new-vars spiral-move vars g-best-vars b l
+    ]
+
+    ;; llevar la solucion a las secciones discretas permitidas
+    set vars snap-design new-vars
+  ]
+
+  update-personal-global-best
+  update-convergence-plot
+  maybe-print-debug
+
+
+  tick
+end
+
+
+]]></code>
+  <widgets>
+    <view3d wrappingAllowedZ="true" x="0" wrappingAllowedX="true" y="0" minPycor="-20" height="255" showTickCounter="true" patchSize="6.0" fontSize="10" wrappingAllowedY="true" width="254" tickCounterLabel="ticks" maxPycor="20" updateMode="1" frameRate="30.0" maxPzcor="20" maxPxcor="20" minPxcor="-20" minPzcor="0"></view3d>
+    <slider x="370" step="1" y="21" max="100" width="174" display="population-size" height="50" min="1" direction="Horizontal" default="30.0" variable="population-size"></slider>
+    <button x="226" y="17" height="47" disableUntilTicks="false" forever="false" kind="Observer" width="102" display="SETUP STRUCT">setup</button>
+    <slider x="369" step="50" y="165" max="2000" width="172" display="max-iterations" height="50" min="100" direction="Horizontal" default="2000.0" variable="max-iterations"></slider>
+    <slider x="369" step="0.1" y="94" max="2" width="172" display="woa-spiral-b" height="50" min="0.5" direction="Horizontal" default="1.9" variable="woa-spiral-b"></slider>
+    <slider x="12" step="0.01" y="207" max="1.0" width="178" display="density" height="50" min="0.01" direction="Horizontal" default="0.1" variable="density"></slider>
+    <slider x="13" step="1000" y="15" max="50000" width="176" display="stress-limit" height="50" min="10000" direction="Horizontal" default="25000.0" variable="stress-limit"></slider>
+    <slider x="11" step="500000" y="143" max="30000000" width="178" display="young-modulus" height="50" min="1000000" direction="Horizontal" default="1.0E7" variable="young-modulus"></slider>
+    <slider x="11" step="0.01" y="80" max="2.0" width="176" display="displacement-limit" height="50" min="0.05" direction="Horizontal" default="0.25" variable="displacement-limit"></slider>
+    <button x="226" y="72" height="46" disableUntilTicks="false" forever="false" kind="Observer" width="106" display="STEP by STEP">go</button>
+    <button x="208" y="126" height="44" disableUntilTicks="false" forever="true" kind="Observer" width="154" display="EJECUTAR STRUCT">go</button>
+    <monitor x="598" precision="17" y="13" height="60" fontSize="11" width="100" display="g-best-val">g-best-val</monitor>
+    <monitor x="599" precision="17" y="229" height="60" fontSize="11" width="100" display="ticks">ticks</monitor>
+    <monitor x="598" precision="17" y="87" height="60" fontSize="11" width="100" display="best-weight">best-weight</monitor>
+    <monitor x="597" precision="17" y="155" height="60" fontSize="11" width="100">best-feasible?</monitor>
+    <plot x="237" autoPlotX="true" yMax="10.0" autoPlotY="true" yAxis="fitness" y="224" xMin="0.0" height="216" legend="true" xMax="10.0" yMin="0.0" width="317" xAxis="iteration" display="Convergencia">
+      <setup></setup>
+      <update></update>
+      <pen interval="1.0" mode="0" display="mean" color="-10899396" legend="true">
+        <setup></setup>
+        <update></update>
+      </pen>
+      <pen interval="1.0" mode="0" display="best" color="-2674135" legend="true">
+        <setup></setup>
+        <update></update>
+      </pen>
+    </plot>
+    <monitor x="6" precision="17" y="461" height="65" fontSize="11" width="921">g-best-vars-text</monitor>
+  </widgets>
+  <info>## ¿QUÉ ES?
+Este modelo implementa la optimización estructural de una celosía espacial de 72 barras utilizando el Whale Optimization Algorithm (WOA) como método de búsqueda metaheurístico.
+El problema de las 72 barras es un benchmark clásico en optimización estructural, ampliamente utilizado para evaluar algoritmos de optimización bajo restricciones de tensión y desplazamiento. La estructura consiste en una torre espacial tridimensional con 20 nodos y 72 barras de acero, sometida a dos casos de carga externos.
+El objetivo del modelo es minimizar el peso total de la estructura, seleccionando secciones transversales discretas para grupos de barras, asegurando que se cumplan simultáneamente:
+
+límites de tensión admisible,
+límites de desplazamiento en nodos superiores.
+
+El algoritmo WOA se inspira en el comportamiento de caza de las ballenas jorobadas, combinando mecanismos de exploración global y explotación local para buscar soluciones óptimas en un espacio de diseño complejo.
+
+## ¿QUÉ PROBLEMA RESUELVE?
+El modelo resuelve un problema de minimización con restricciones, formulado como:
+
+Minimizar el peso total de la estructura
+sujeto a:
+
+tensiones máximas ≤ límite admisible
+desplazamientos máximos en nodos superiores ≤ límite especificado
+
+
+Las variables de diseño son 16 áreas transversales, cada una asociada a un grupo de barras, elegidas de un conjunto discreto de 64 secciones comerciales.
+Este tipo de problema es representativo de situaciones reales en ingeniería estructural, donde:
+
+las secciones disponibles son discretas,
+los cálculos estructurales requieren análisis numéricos,
+y el espacio de búsqueda es altamente no lineal y combinatorio.
+
+
+## ¿CÓMO TRABAJA EL MODELO?
+El modelo combina tres componentes principales:
+
+1. Modelo estructural (FEM 3D)
+La estructura se analiza mediante el método de los elementos finitos para barras espaciales 3D:
+
+Cada barra se modela como un elemento de celosía con 6 grados de libertad (3 por nodo).
+Se ensambla una matriz de rigidez global de tamaño 60×60.
+Se resuelven los desplazamientos nodales para dos casos de carga independientes.
+A partir de los desplazamientos se calculan:
+
+tensiones axiales en las barras,
+desplazamientos máximos en los nodos superiores.
+
+
+
+El modelo reproduce fielmente la geometría, conectividad y cargas del benchmark clásico de las 72 barras.
+
+2. Evaluación del diseño con restricciones
+Cada solución candidata se evalúa mediante una función objetivo penalizada:
+
+Se calcula el peso real de la estructura.
+Se comprueba el cumplimiento de:
+
+límites de tensión,
+límites de desplazamiento.
+
+
+Las violaciones se incorporan usando un método de penalización progresiva, que aumenta su efecto a medida que avanzan las iteraciones.
+
+De este modo, el algoritmo favorece inicialmente la exploración y, progresivamente, la búsqueda de soluciones factibles y ligeras.
+
+3. Optimización mediante Whale Optimization Algorithm (WOA)
+WOA actualiza las soluciones utilizando dos mecanismos combinados con igual probabilidad:
+a) Encerramiento de la presa (explotación)
+Las soluciones se mueven hacia la mejor solución global conocida, simulando el comportamiento de rodeo de la presa.
+b) Movimiento en espiral
+Se aplica un movimiento en espiral logarítmica alrededor de la mejor solución, simulando la maniobra de caza con red de burbujas.
+Cuando el parámetro A es mayor que 1 en valor absoluto, el algoritmo entra en fase de exploración, moviéndose hacia soluciones aleatorias de la población.
+Además, dado que el problema es discreto, cada nueva solución se redondea a la sección comercial más cercana permitida.
+
+## ¿CÓMO USAR EL MODELO?
+En el área de interfaz se encuentran los siguientes controles:
+Parámetros estructurales
+
+STRESS-LIMIT: tensión admisible (psi).
+DISPLACEMENT-LIMIT: desplazamiento máximo admisible (in).
+YOUNG-MODULUS: módulo de elasticidad del material.
+DENSITY: densidad del material.
+
+Parámetros del algoritmo
+
+POPULATION-SIZE: número de ballenas (soluciones).
+MAX-ITERATIONS: número máximo de iteraciones del algoritmo.
+WOA-SPIRAL-B: parámetro de la espiral del WOA.
+
+Botones
+
+SETUP: inicializa el modelo estructural y la población.
+GO: ejecuta el algoritmo de optimización.
+STEP BY STEP: avanza una iteración por vez.
+
+El gráfico de Convergencia muestra la evolución del mejor valor encontrado y el valor medio de la población.
+
+## RESULTADOS Y VALIDACIÓN
+El modelo incluye una batería de reporters de validación para comprobar que:
+
+la geometría y conectividad son correctas,
+el diseño óptimo publicado en la literatura (≈ 389.33 lb) es factible,
+las tensiones y desplazamientos coinciden con los valores de referencia del benchmark.
+
+Esto garantiza que cualquier desviación en los resultados del algoritmo se debe exclusivamente al comportamiento del optimizador y no a errores de modelado.
+
+## COSAS A TENER EN CUENTA
+
+El problema es altamente discreto y no lineal, por lo que el WOA puede estancarse en óptimos locales.
+El redondeo a secciones comerciales limita la exploración continua.
+Para alcanzar sistemáticamente el óptimo global suelen ser necesarias:
+
+poblaciones grandes,
+mayor número de iteraciones,
+o mecanismos adicionales de diversidad.
+
+
+
+El hecho de no alcanzar exactamente el valor óptimo no invalida el modelo estructural ni la formulación del problema.
+
+## REALICE PRUEBAS
+
+Modifique el tamaño de la población.
+Aumente el número de iteraciones.
+Observe cómo cambian el peso, los desplazamientos y la convergencia.
+Compare los resultados con el diseño benchmark validado.
+
+
+## MODELOS RELACIONADOS
+
+Whale Optimization Algorithm (WOA)
+Enhanced Whale Optimization Algorithm (EWOA)
+Differential Evolution (DE)
+Particle Swarm Optimization (PSO)
+Benchmarks clásicos de optimización de celosías espaciales
+
+
+## CRÉDITOS
+Este modelo ha sido desarrollado como parte del Trabajo de Fin de Grado de Raúl Caubera Jiménez,
+supervisado por Rocío Romero Zaliz
+en la Universidad de Granada (UGR).
+El desarrollo se apoya en benchmarks clásicos de optimización estructural y en algoritmos metaheurísticos ampliamente utilizados en la literatura científica.
+
+Trabajo de ejemplo licenciado por the Creative Commons Attribution-NonCommercial-ShareAlike 4.0 License.  To view a copy of this license, visit https://creativecommons.org/licenses/by-nc-sa/4.0/ or send a letter to Creative Commons, 559 Nathan Abbott Way, Stanford, California 94305, USA.
+
+![CC BY-NC-SA 4.0](https://licensebuttons.net/l/by-nc-sa/3.0/88x31.png)
+
+
+## REFERNCIAS
+
+*....
+
+* ....
+
+*.....
+
+*.....</info>
+  <turtleShapes>
+    <shape name="default" rotatable="true" editableColorIndex="0">
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="150" y="5"></point>
+        <point x="40" y="250"></point>
+        <point x="150" y="205"></point>
+        <point x="260" y="250"></point>
+      </polygon>
+    </shape>
+    <shape name="airplane" rotatable="true" editableColorIndex="0">
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="150" y="0"></point>
+        <point x="135" y="15"></point>
+        <point x="120" y="60"></point>
+        <point x="120" y="105"></point>
+        <point x="15" y="165"></point>
+        <point x="15" y="195"></point>
+        <point x="120" y="180"></point>
+        <point x="135" y="240"></point>
+        <point x="105" y="270"></point>
+        <point x="120" y="285"></point>
+        <point x="150" y="270"></point>
+        <point x="180" y="285"></point>
+        <point x="210" y="270"></point>
+        <point x="165" y="240"></point>
+        <point x="180" y="180"></point>
+        <point x="285" y="195"></point>
+        <point x="285" y="165"></point>
+        <point x="180" y="105"></point>
+        <point x="180" y="60"></point>
+        <point x="165" y="15"></point>
+      </polygon>
+    </shape>
+    <shape name="arrow" rotatable="true" editableColorIndex="0">
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="150" y="0"></point>
+        <point x="0" y="150"></point>
+        <point x="105" y="150"></point>
+        <point x="105" y="293"></point>
+        <point x="195" y="293"></point>
+        <point x="195" y="150"></point>
+        <point x="300" y="150"></point>
+      </polygon>
+    </shape>
+    <shape name="box" rotatable="false" editableColorIndex="0">
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="150" y="285"></point>
+        <point x="285" y="225"></point>
+        <point x="285" y="75"></point>
+        <point x="150" y="135"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="150" y="135"></point>
+        <point x="15" y="75"></point>
+        <point x="150" y="15"></point>
+        <point x="285" y="75"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="15" y="75"></point>
+        <point x="15" y="225"></point>
+        <point x="150" y="285"></point>
+        <point x="150" y="135"></point>
+      </polygon>
+      <line endX="150" startY="285" marked="false" color="255" endY="135" startX="150"></line>
+      <line endX="15" startY="135" marked="false" color="255" endY="75" startX="150"></line>
+      <line endX="285" startY="135" marked="false" color="255" endY="75" startX="150"></line>
+    </shape>
+    <shape name="bug" rotatable="true" editableColorIndex="0">
+      <circle x="96" y="182" marked="true" color="-1920102913" diameter="108" filled="true"></circle>
+      <circle x="110" y="127" marked="true" color="-1920102913" diameter="80" filled="true"></circle>
+      <circle x="110" y="75" marked="true" color="-1920102913" diameter="80" filled="true"></circle>
+      <line endX="80" startY="100" marked="true" color="-1920102913" endY="30" startX="150"></line>
+      <line endX="220" startY="100" marked="true" color="-1920102913" endY="30" startX="150"></line>
+    </shape>
+    <shape name="butterfly" rotatable="true" editableColorIndex="0">
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="150" y="165"></point>
+        <point x="209" y="199"></point>
+        <point x="225" y="225"></point>
+        <point x="225" y="255"></point>
+        <point x="195" y="270"></point>
+        <point x="165" y="255"></point>
+        <point x="150" y="240"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="150" y="165"></point>
+        <point x="89" y="198"></point>
+        <point x="75" y="225"></point>
+        <point x="75" y="255"></point>
+        <point x="105" y="270"></point>
+        <point x="135" y="255"></point>
+        <point x="150" y="240"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="139" y="148"></point>
+        <point x="100" y="105"></point>
+        <point x="55" y="90"></point>
+        <point x="25" y="90"></point>
+        <point x="10" y="105"></point>
+        <point x="10" y="135"></point>
+        <point x="25" y="180"></point>
+        <point x="40" y="195"></point>
+        <point x="85" y="194"></point>
+        <point x="139" y="163"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="162" y="150"></point>
+        <point x="200" y="105"></point>
+        <point x="245" y="90"></point>
+        <point x="275" y="90"></point>
+        <point x="290" y="105"></point>
+        <point x="290" y="135"></point>
+        <point x="275" y="180"></point>
+        <point x="260" y="195"></point>
+        <point x="215" y="195"></point>
+        <point x="162" y="165"></point>
+      </polygon>
+      <polygon color="255" filled="true" marked="false">
+        <point x="150" y="255"></point>
+        <point x="135" y="225"></point>
+        <point x="120" y="150"></point>
+        <point x="135" y="120"></point>
+        <point x="150" y="105"></point>
+        <point x="165" y="120"></point>
+        <point x="180" y="150"></point>
+        <point x="165" y="225"></point>
+      </polygon>
+      <circle x="135" y="90" marked="false" color="255" diameter="30" filled="true"></circle>
+      <line endX="195" startY="105" marked="false" color="255" endY="60" startX="150"></line>
+      <line endX="105" startY="105" marked="false" color="255" endY="60" startX="150"></line>
+    </shape>
+    <shape name="car" rotatable="false" editableColorIndex="0">
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="300" y="180"></point>
+        <point x="279" y="164"></point>
+        <point x="261" y="144"></point>
+        <point x="240" y="135"></point>
+        <point x="226" y="132"></point>
+        <point x="213" y="106"></point>
+        <point x="203" y="84"></point>
+        <point x="185" y="63"></point>
+        <point x="159" y="50"></point>
+        <point x="135" y="50"></point>
+        <point x="75" y="60"></point>
+        <point x="0" y="150"></point>
+        <point x="0" y="165"></point>
+        <point x="0" y="225"></point>
+        <point x="300" y="225"></point>
+        <point x="300" y="180"></point>
+      </polygon>
+      <circle x="180" y="180" marked="false" color="255" diameter="90" filled="true"></circle>
+      <circle x="30" y="180" marked="false" color="255" diameter="90" filled="true"></circle>
+      <polygon color="255" filled="true" marked="false">
+        <point x="162" y="80"></point>
+        <point x="132" y="78"></point>
+        <point x="134" y="135"></point>
+        <point x="209" y="135"></point>
+        <point x="194" y="105"></point>
+        <point x="189" y="96"></point>
+        <point x="180" y="89"></point>
+      </polygon>
+      <circle x="47" y="195" marked="true" color="-1920102913" diameter="58" filled="true"></circle>
+      <circle x="195" y="195" marked="true" color="-1920102913" diameter="58" filled="true"></circle>
+    </shape>
+    <shape name="circle" rotatable="false" editableColorIndex="0">
+      <circle x="0" y="0" marked="true" color="-1920102913" diameter="300" filled="true"></circle>
+    </shape>
+    <shape name="circle 2" rotatable="false" editableColorIndex="0">
+      <circle x="0" y="0" marked="true" color="-1920102913" diameter="300" filled="true"></circle>
+      <circle x="30" y="30" marked="false" color="255" diameter="240" filled="true"></circle>
+    </shape>
+    <shape name="cow" rotatable="false" editableColorIndex="0">
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="200" y="193"></point>
+        <point x="197" y="249"></point>
+        <point x="179" y="249"></point>
+        <point x="177" y="196"></point>
+        <point x="166" y="187"></point>
+        <point x="140" y="189"></point>
+        <point x="93" y="191"></point>
+        <point x="78" y="179"></point>
+        <point x="72" y="211"></point>
+        <point x="49" y="209"></point>
+        <point x="48" y="181"></point>
+        <point x="37" y="149"></point>
+        <point x="25" y="120"></point>
+        <point x="25" y="89"></point>
+        <point x="45" y="72"></point>
+        <point x="103" y="84"></point>
+        <point x="179" y="75"></point>
+        <point x="198" y="76"></point>
+        <point x="252" y="64"></point>
+        <point x="272" y="81"></point>
+        <point x="293" y="103"></point>
+        <point x="285" y="121"></point>
+        <point x="255" y="121"></point>
+        <point x="242" y="118"></point>
+        <point x="224" y="167"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="73" y="210"></point>
+        <point x="86" y="251"></point>
+        <point x="62" y="249"></point>
+        <point x="48" y="208"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="25" y="114"></point>
+        <point x="16" y="195"></point>
+        <point x="9" y="204"></point>
+        <point x="23" y="213"></point>
+        <point x="25" y="200"></point>
+        <point x="39" y="123"></point>
+      </polygon>
+    </shape>
+    <shape name="cylinder" rotatable="false" editableColorIndex="0">
+      <circle x="0" y="0" marked="true" color="-1920102913" diameter="300" filled="true"></circle>
+    </shape>
+    <shape name="dot" rotatable="false" editableColorIndex="0">
+      <circle x="90" y="90" marked="true" color="-1920102913" diameter="120" filled="true"></circle>
+    </shape>
+    <shape name="face happy" rotatable="false" editableColorIndex="0">
+      <circle x="8" y="8" marked="true" color="-1920102913" diameter="285" filled="true"></circle>
+      <circle x="60" y="75" marked="false" color="255" diameter="60" filled="true"></circle>
+      <circle x="180" y="75" marked="false" color="255" diameter="60" filled="true"></circle>
+      <polygon color="255" filled="true" marked="false">
+        <point x="150" y="255"></point>
+        <point x="90" y="239"></point>
+        <point x="62" y="213"></point>
+        <point x="47" y="191"></point>
+        <point x="67" y="179"></point>
+        <point x="90" y="203"></point>
+        <point x="109" y="218"></point>
+        <point x="150" y="225"></point>
+        <point x="192" y="218"></point>
+        <point x="210" y="203"></point>
+        <point x="227" y="181"></point>
+        <point x="251" y="194"></point>
+        <point x="236" y="217"></point>
+        <point x="212" y="240"></point>
+      </polygon>
+    </shape>
+    <shape name="face neutral" rotatable="false" editableColorIndex="0">
+      <circle x="8" y="7" marked="true" color="-1920102913" diameter="285" filled="true"></circle>
+      <circle x="60" y="75" marked="false" color="255" diameter="60" filled="true"></circle>
+      <circle x="180" y="75" marked="false" color="255" diameter="60" filled="true"></circle>
+      <rectangle endX="240" startY="195" marked="false" color="255" endY="225" startX="60" filled="true"></rectangle>
+    </shape>
+    <shape name="face sad" rotatable="false" editableColorIndex="0">
+      <circle x="8" y="8" marked="true" color="-1920102913" diameter="285" filled="true"></circle>
+      <circle x="60" y="75" marked="false" color="255" diameter="60" filled="true"></circle>
+      <circle x="180" y="75" marked="false" color="255" diameter="60" filled="true"></circle>
+      <polygon color="255" filled="true" marked="false">
+        <point x="150" y="168"></point>
+        <point x="90" y="184"></point>
+        <point x="62" y="210"></point>
+        <point x="47" y="232"></point>
+        <point x="67" y="244"></point>
+        <point x="90" y="220"></point>
+        <point x="109" y="205"></point>
+        <point x="150" y="198"></point>
+        <point x="192" y="205"></point>
+        <point x="210" y="220"></point>
+        <point x="227" y="242"></point>
+        <point x="251" y="229"></point>
+        <point x="236" y="206"></point>
+        <point x="212" y="183"></point>
+      </polygon>
+    </shape>
+    <shape name="fish" rotatable="false" editableColorIndex="0">
+      <polygon color="-1" filled="true" marked="false">
+        <point x="44" y="131"></point>
+        <point x="21" y="87"></point>
+        <point x="15" y="86"></point>
+        <point x="0" y="120"></point>
+        <point x="15" y="150"></point>
+        <point x="0" y="180"></point>
+        <point x="13" y="214"></point>
+        <point x="20" y="212"></point>
+        <point x="45" y="166"></point>
+      </polygon>
+      <polygon color="-1" filled="true" marked="false">
+        <point x="135" y="195"></point>
+        <point x="119" y="235"></point>
+        <point x="95" y="218"></point>
+        <point x="76" y="210"></point>
+        <point x="46" y="204"></point>
+        <point x="60" y="165"></point>
+      </polygon>
+      <polygon color="-1" filled="true" marked="false">
+        <point x="75" y="45"></point>
+        <point x="83" y="77"></point>
+        <point x="71" y="103"></point>
+        <point x="86" y="114"></point>
+        <point x="166" y="78"></point>
+        <point x="135" y="60"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="30" y="136"></point>
+        <point x="151" y="77"></point>
+        <point x="226" y="81"></point>
+        <point x="280" y="119"></point>
+        <point x="292" y="146"></point>
+        <point x="292" y="160"></point>
+        <point x="287" y="170"></point>
+        <point x="270" y="195"></point>
+        <point x="195" y="210"></point>
+        <point x="151" y="212"></point>
+        <point x="30" y="166"></point>
+      </polygon>
+      <circle x="215" y="106" marked="false" color="255" diameter="30" filled="true"></circle>
+    </shape>
+    <shape name="flag" rotatable="false" editableColorIndex="0">
+      <rectangle endX="75" startY="15" marked="true" color="-1920102913" endY="300" startX="60" filled="true"></rectangle>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="90" y="150"></point>
+        <point x="270" y="90"></point>
+        <point x="90" y="30"></point>
+      </polygon>
+      <line endX="90" startY="135" marked="true" color="-1920102913" endY="135" startX="75"></line>
+      <line endX="90" startY="45" marked="true" color="-1920102913" endY="45" startX="75"></line>
+    </shape>
+    <shape name="flower" rotatable="false" editableColorIndex="0">
+      <polygon color="1504722175" filled="true" marked="false">
+        <point x="135" y="120"></point>
+        <point x="165" y="165"></point>
+        <point x="180" y="210"></point>
+        <point x="180" y="240"></point>
+        <point x="150" y="300"></point>
+        <point x="165" y="300"></point>
+        <point x="195" y="240"></point>
+        <point x="195" y="195"></point>
+        <point x="165" y="135"></point>
+      </polygon>
+      <circle x="85" y="132" marked="true" color="-1920102913" diameter="38" filled="true"></circle>
+      <circle x="130" y="147" marked="true" color="-1920102913" diameter="38" filled="true"></circle>
+      <circle x="192" y="85" marked="true" color="-1920102913" diameter="38" filled="true"></circle>
+      <circle x="85" y="40" marked="true" color="-1920102913" diameter="38" filled="true"></circle>
+      <circle x="177" y="40" marked="true" color="-1920102913" diameter="38" filled="true"></circle>
+      <circle x="177" y="132" marked="true" color="-1920102913" diameter="38" filled="true"></circle>
+      <circle x="70" y="85" marked="true" color="-1920102913" diameter="38" filled="true"></circle>
+      <circle x="130" y="25" marked="true" color="-1920102913" diameter="38" filled="true"></circle>
+      <circle x="96" y="51" marked="true" color="-1920102913" diameter="108" filled="true"></circle>
+      <circle x="113" y="68" marked="false" color="255" diameter="74" filled="true"></circle>
+      <polygon color="1504722175" filled="true" marked="false">
+        <point x="189" y="233"></point>
+        <point x="219" y="188"></point>
+        <point x="249" y="173"></point>
+        <point x="279" y="188"></point>
+        <point x="234" y="218"></point>
+      </polygon>
+      <polygon color="1504722175" filled="true" marked="false">
+        <point x="180" y="255"></point>
+        <point x="150" y="210"></point>
+        <point x="105" y="210"></point>
+        <point x="75" y="240"></point>
+        <point x="135" y="240"></point>
+      </polygon>
+    </shape>
+    <shape name="house" rotatable="false" editableColorIndex="0">
+      <rectangle endX="255" startY="120" marked="true" color="-1920102913" endY="285" startX="45" filled="true"></rectangle>
+      <rectangle endX="180" startY="210" marked="false" color="255" endY="285" startX="120" filled="true"></rectangle>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="15" y="120"></point>
+        <point x="150" y="15"></point>
+        <point x="285" y="120"></point>
+      </polygon>
+      <line endX="270" startY="120" marked="false" color="255" endY="120" startX="30"></line>
+    </shape>
+    <shape name="leaf" rotatable="false" editableColorIndex="0">
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="150" y="210"></point>
+        <point x="135" y="195"></point>
+        <point x="120" y="210"></point>
+        <point x="60" y="210"></point>
+        <point x="30" y="195"></point>
+        <point x="60" y="180"></point>
+        <point x="60" y="165"></point>
+        <point x="15" y="135"></point>
+        <point x="30" y="120"></point>
+        <point x="15" y="105"></point>
+        <point x="40" y="104"></point>
+        <point x="45" y="90"></point>
+        <point x="60" y="90"></point>
+        <point x="90" y="105"></point>
+        <point x="105" y="120"></point>
+        <point x="120" y="120"></point>
+        <point x="105" y="60"></point>
+        <point x="120" y="60"></point>
+        <point x="135" y="30"></point>
+        <point x="150" y="15"></point>
+        <point x="165" y="30"></point>
+        <point x="180" y="60"></point>
+        <point x="195" y="60"></point>
+        <point x="180" y="120"></point>
+        <point x="195" y="120"></point>
+        <point x="210" y="105"></point>
+        <point x="240" y="90"></point>
+        <point x="255" y="90"></point>
+        <point x="263" y="104"></point>
+        <point x="285" y="105"></point>
+        <point x="270" y="120"></point>
+        <point x="285" y="135"></point>
+        <point x="240" y="165"></point>
+        <point x="240" y="180"></point>
+        <point x="270" y="195"></point>
+        <point x="240" y="210"></point>
+        <point x="180" y="210"></point>
+        <point x="165" y="195"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="135" y="195"></point>
+        <point x="135" y="240"></point>
+        <point x="120" y="255"></point>
+        <point x="105" y="255"></point>
+        <point x="105" y="285"></point>
+        <point x="135" y="285"></point>
+        <point x="165" y="240"></point>
+        <point x="165" y="195"></point>
+      </polygon>
+    </shape>
+    <shape name="line" rotatable="true" editableColorIndex="0">
+      <line endX="150" startY="0" marked="true" color="-1920102913" endY="300" startX="150"></line>
+    </shape>
+    <shape name="line half" rotatable="true" editableColorIndex="0">
+      <line endX="150" startY="0" marked="true" color="-1920102913" endY="150" startX="150"></line>
+    </shape>
+    <shape name="pentagon" rotatable="false" editableColorIndex="0">
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="150" y="15"></point>
+        <point x="15" y="120"></point>
+        <point x="60" y="285"></point>
+        <point x="240" y="285"></point>
+        <point x="285" y="120"></point>
+      </polygon>
+    </shape>
+    <shape name="person" rotatable="false" editableColorIndex="0">
+      <circle x="110" y="5" marked="true" color="-1920102913" diameter="80" filled="true"></circle>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="105" y="90"></point>
+        <point x="120" y="195"></point>
+        <point x="90" y="285"></point>
+        <point x="105" y="300"></point>
+        <point x="135" y="300"></point>
+        <point x="150" y="225"></point>
+        <point x="165" y="300"></point>
+        <point x="195" y="300"></point>
+        <point x="210" y="285"></point>
+        <point x="180" y="195"></point>
+        <point x="195" y="90"></point>
+      </polygon>
+      <rectangle endX="172" startY="79" marked="true" color="-1920102913" endY="94" startX="127" filled="true"></rectangle>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="195" y="90"></point>
+        <point x="240" y="150"></point>
+        <point x="225" y="180"></point>
+        <point x="165" y="105"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="105" y="90"></point>
+        <point x="60" y="150"></point>
+        <point x="75" y="180"></point>
+        <point x="135" y="105"></point>
+      </polygon>
+    </shape>
+    <shape name="plant" rotatable="false" editableColorIndex="0">
+      <rectangle endX="165" startY="90" marked="true" color="-1920102913" endY="300" startX="135" filled="true"></rectangle>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="135" y="255"></point>
+        <point x="90" y="210"></point>
+        <point x="45" y="195"></point>
+        <point x="75" y="255"></point>
+        <point x="135" y="285"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="165" y="255"></point>
+        <point x="210" y="210"></point>
+        <point x="255" y="195"></point>
+        <point x="225" y="255"></point>
+        <point x="165" y="285"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="135" y="180"></point>
+        <point x="90" y="135"></point>
+        <point x="45" y="120"></point>
+        <point x="75" y="180"></point>
+        <point x="135" y="210"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="165" y="180"></point>
+        <point x="165" y="210"></point>
+        <point x="225" y="180"></point>
+        <point x="255" y="120"></point>
+        <point x="210" y="135"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="135" y="105"></point>
+        <point x="90" y="60"></point>
+        <point x="45" y="45"></point>
+        <point x="75" y="105"></point>
+        <point x="135" y="135"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="165" y="105"></point>
+        <point x="165" y="135"></point>
+        <point x="225" y="105"></point>
+        <point x="255" y="45"></point>
+        <point x="210" y="60"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="135" y="90"></point>
+        <point x="120" y="45"></point>
+        <point x="150" y="15"></point>
+        <point x="180" y="45"></point>
+        <point x="165" y="90"></point>
+      </polygon>
+    </shape>
+    <shape name="sheep" rotatable="false" editableColorIndex="15">
+      <circle x="203" y="65" marked="true" color="-1" diameter="88" filled="true"></circle>
+      <circle x="70" y="65" marked="true" color="-1" diameter="162" filled="true"></circle>
+      <circle x="150" y="105" marked="true" color="-1" diameter="120" filled="true"></circle>
+      <polygon color="-1920102913" filled="true" marked="false">
+        <point x="218" y="120"></point>
+        <point x="240" y="165"></point>
+        <point x="255" y="165"></point>
+        <point x="278" y="120"></point>
+      </polygon>
+      <circle x="214" y="72" marked="false" color="-1920102913" diameter="67" filled="true"></circle>
+      <rectangle endX="179" startY="223" marked="true" color="-1" endY="298" startX="164" filled="true"></rectangle>
+      <polygon color="-1" filled="true" marked="true">
+        <point x="45" y="285"></point>
+        <point x="30" y="285"></point>
+        <point x="30" y="240"></point>
+        <point x="15" y="195"></point>
+        <point x="45" y="210"></point>
+      </polygon>
+      <circle x="3" y="83" marked="true" color="-1" diameter="150" filled="true"></circle>
+      <rectangle endX="80" startY="221" marked="true" color="-1" endY="296" startX="65" filled="true"></rectangle>
+      <polygon color="-1" filled="true" marked="true">
+        <point x="195" y="285"></point>
+        <point x="210" y="285"></point>
+        <point x="210" y="240"></point>
+        <point x="240" y="210"></point>
+        <point x="195" y="210"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="false">
+        <point x="276" y="85"></point>
+        <point x="285" y="105"></point>
+        <point x="302" y="99"></point>
+        <point x="294" y="83"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="false">
+        <point x="219" y="85"></point>
+        <point x="210" y="105"></point>
+        <point x="193" y="99"></point>
+        <point x="201" y="83"></point>
+      </polygon>
+    </shape>
+    <shape name="square" rotatable="false" editableColorIndex="0">
+      <rectangle endX="270" startY="30" marked="true" color="-1920102913" endY="270" startX="30" filled="true"></rectangle>
+    </shape>
+    <shape name="square 2" rotatable="false" editableColorIndex="0">
+      <rectangle endX="270" startY="30" marked="true" color="-1920102913" endY="270" startX="30" filled="true"></rectangle>
+      <rectangle endX="240" startY="60" marked="false" color="255" endY="240" startX="60" filled="true"></rectangle>
+    </shape>
+    <shape name="star" rotatable="false" editableColorIndex="0">
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="151" y="1"></point>
+        <point x="185" y="108"></point>
+        <point x="298" y="108"></point>
+        <point x="207" y="175"></point>
+        <point x="242" y="282"></point>
+        <point x="151" y="216"></point>
+        <point x="59" y="282"></point>
+        <point x="94" y="175"></point>
+        <point x="3" y="108"></point>
+        <point x="116" y="108"></point>
+      </polygon>
+    </shape>
+    <shape name="target" rotatable="false" editableColorIndex="0">
+      <circle x="0" y="0" marked="true" color="-1920102913" diameter="300" filled="true"></circle>
+      <circle x="30" y="30" marked="false" color="255" diameter="240" filled="true"></circle>
+      <circle x="60" y="60" marked="true" color="-1920102913" diameter="180" filled="true"></circle>
+      <circle x="90" y="90" marked="false" color="255" diameter="120" filled="true"></circle>
+      <circle x="120" y="120" marked="true" color="-1920102913" diameter="60" filled="true"></circle>
+    </shape>
+    <shape name="tree" rotatable="false" editableColorIndex="0">
+      <circle x="118" y="3" marked="true" color="-1920102913" diameter="94" filled="true"></circle>
+      <rectangle endX="180" startY="195" marked="false" color="-1653716737" endY="300" startX="120" filled="true"></rectangle>
+      <circle x="65" y="21" marked="true" color="-1920102913" diameter="108" filled="true"></circle>
+      <circle x="116" y="41" marked="true" color="-1920102913" diameter="127" filled="true"></circle>
+      <circle x="45" y="90" marked="true" color="-1920102913" diameter="120" filled="true"></circle>
+      <circle x="104" y="74" marked="true" color="-1920102913" diameter="152" filled="true"></circle>
+    </shape>
+    <shape name="triangle" rotatable="false" editableColorIndex="0">
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="150" y="30"></point>
+        <point x="15" y="255"></point>
+        <point x="285" y="255"></point>
+      </polygon>
+    </shape>
+    <shape name="triangle 2" rotatable="false" editableColorIndex="0">
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="150" y="30"></point>
+        <point x="15" y="255"></point>
+        <point x="285" y="255"></point>
+      </polygon>
+      <polygon color="255" filled="true" marked="false">
+        <point x="151" y="99"></point>
+        <point x="225" y="223"></point>
+        <point x="75" y="224"></point>
+      </polygon>
+    </shape>
+    <shape name="truck" rotatable="false" editableColorIndex="0">
+      <rectangle endX="195" startY="45" marked="true" color="-1920102913" endY="187" startX="4" filled="true"></rectangle>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="296" y="193"></point>
+        <point x="296" y="150"></point>
+        <point x="259" y="134"></point>
+        <point x="244" y="104"></point>
+        <point x="208" y="104"></point>
+        <point x="207" y="194"></point>
+      </polygon>
+      <rectangle endX="195" startY="60" marked="false" color="-1" endY="105" startX="195" filled="true"></rectangle>
+      <polygon color="255" filled="true" marked="false">
+        <point x="238" y="112"></point>
+        <point x="252" y="141"></point>
+        <point x="219" y="141"></point>
+        <point x="218" y="112"></point>
+      </polygon>
+      <circle x="234" y="174" marked="false" color="255" diameter="42" filled="true"></circle>
+      <rectangle endX="214" startY="185" marked="true" color="-1920102913" endY="194" startX="181" filled="true"></rectangle>
+      <circle x="144" y="174" marked="false" color="255" diameter="42" filled="true"></circle>
+      <circle x="24" y="174" marked="false" color="255" diameter="42" filled="true"></circle>
+      <circle x="24" y="174" marked="true" color="-1920102913" diameter="42" filled="false"></circle>
+      <circle x="144" y="174" marked="true" color="-1920102913" diameter="42" filled="false"></circle>
+      <circle x="234" y="174" marked="true" color="-1920102913" diameter="42" filled="false"></circle>
+    </shape>
+    <shape name="turtle" rotatable="true" editableColorIndex="0">
+      <polygon color="1504722175" filled="true" marked="false">
+        <point x="215" y="204"></point>
+        <point x="240" y="233"></point>
+        <point x="246" y="254"></point>
+        <point x="228" y="266"></point>
+        <point x="215" y="252"></point>
+        <point x="193" y="210"></point>
+      </polygon>
+      <polygon color="1504722175" filled="true" marked="false">
+        <point x="195" y="90"></point>
+        <point x="225" y="75"></point>
+        <point x="245" y="75"></point>
+        <point x="260" y="89"></point>
+        <point x="269" y="108"></point>
+        <point x="261" y="124"></point>
+        <point x="240" y="105"></point>
+        <point x="225" y="105"></point>
+        <point x="210" y="105"></point>
+      </polygon>
+      <polygon color="1504722175" filled="true" marked="false">
+        <point x="105" y="90"></point>
+        <point x="75" y="75"></point>
+        <point x="55" y="75"></point>
+        <point x="40" y="89"></point>
+        <point x="31" y="108"></point>
+        <point x="39" y="124"></point>
+        <point x="60" y="105"></point>
+        <point x="75" y="105"></point>
+        <point x="90" y="105"></point>
+      </polygon>
+      <polygon color="1504722175" filled="true" marked="false">
+        <point x="132" y="85"></point>
+        <point x="134" y="64"></point>
+        <point x="107" y="51"></point>
+        <point x="108" y="17"></point>
+        <point x="150" y="2"></point>
+        <point x="192" y="18"></point>
+        <point x="192" y="52"></point>
+        <point x="169" y="65"></point>
+        <point x="172" y="87"></point>
+      </polygon>
+      <polygon color="1504722175" filled="true" marked="false">
+        <point x="85" y="204"></point>
+        <point x="60" y="233"></point>
+        <point x="54" y="254"></point>
+        <point x="72" y="266"></point>
+        <point x="85" y="252"></point>
+        <point x="107" y="210"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="119" y="75"></point>
+        <point x="179" y="75"></point>
+        <point x="209" y="101"></point>
+        <point x="224" y="135"></point>
+        <point x="220" y="225"></point>
+        <point x="175" y="261"></point>
+        <point x="128" y="261"></point>
+        <point x="81" y="224"></point>
+        <point x="74" y="135"></point>
+        <point x="88" y="99"></point>
+      </polygon>
+    </shape>
+    <shape name="wheel" rotatable="false" editableColorIndex="0">
+      <circle x="3" y="3" marked="true" color="-1920102913" diameter="294" filled="true"></circle>
+      <circle x="30" y="30" marked="false" color="255" diameter="240" filled="true"></circle>
+      <line endX="150" startY="285" marked="true" color="-1920102913" endY="15" startX="150"></line>
+      <line endX="285" startY="150" marked="true" color="-1920102913" endY="150" startX="15"></line>
+      <circle x="120" y="120" marked="true" color="-1920102913" diameter="60" filled="true"></circle>
+      <line endX="79" startY="40" marked="true" color="-1920102913" endY="269" startX="216"></line>
+      <line endX="269" startY="84" marked="true" color="-1920102913" endY="221" startX="40"></line>
+      <line endX="269" startY="216" marked="true" color="-1920102913" endY="79" startX="40"></line>
+      <line endX="221" startY="40" marked="true" color="-1920102913" endY="269" startX="84"></line>
+    </shape>
+    <shape name="wolf" rotatable="false" editableColorIndex="0">
+      <polygon color="255" filled="true" marked="false">
+        <point x="253" y="133"></point>
+        <point x="245" y="131"></point>
+        <point x="245" y="133"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="2" y="194"></point>
+        <point x="13" y="197"></point>
+        <point x="30" y="191"></point>
+        <point x="38" y="193"></point>
+        <point x="38" y="205"></point>
+        <point x="20" y="226"></point>
+        <point x="20" y="257"></point>
+        <point x="27" y="265"></point>
+        <point x="38" y="266"></point>
+        <point x="40" y="260"></point>
+        <point x="31" y="253"></point>
+        <point x="31" y="230"></point>
+        <point x="60" y="206"></point>
+        <point x="68" y="198"></point>
+        <point x="75" y="209"></point>
+        <point x="66" y="228"></point>
+        <point x="65" y="243"></point>
+        <point x="82" y="261"></point>
+        <point x="84" y="268"></point>
+        <point x="100" y="267"></point>
+        <point x="103" y="261"></point>
+        <point x="77" y="239"></point>
+        <point x="79" y="231"></point>
+        <point x="100" y="207"></point>
+        <point x="98" y="196"></point>
+        <point x="119" y="201"></point>
+        <point x="143" y="202"></point>
+        <point x="160" y="195"></point>
+        <point x="166" y="210"></point>
+        <point x="172" y="213"></point>
+        <point x="173" y="238"></point>
+        <point x="167" y="251"></point>
+        <point x="160" y="248"></point>
+        <point x="154" y="265"></point>
+        <point x="169" y="264"></point>
+        <point x="178" y="247"></point>
+        <point x="186" y="240"></point>
+        <point x="198" y="260"></point>
+        <point x="200" y="271"></point>
+        <point x="217" y="271"></point>
+        <point x="219" y="262"></point>
+        <point x="207" y="258"></point>
+        <point x="195" y="230"></point>
+        <point x="192" y="198"></point>
+        <point x="210" y="184"></point>
+        <point x="227" y="164"></point>
+        <point x="242" y="144"></point>
+        <point x="259" y="145"></point>
+        <point x="284" y="151"></point>
+        <point x="277" y="141"></point>
+        <point x="293" y="140"></point>
+        <point x="299" y="134"></point>
+        <point x="297" y="127"></point>
+        <point x="273" y="119"></point>
+        <point x="270" y="105"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="-1" y="195"></point>
+        <point x="14" y="180"></point>
+        <point x="36" y="166"></point>
+        <point x="40" y="153"></point>
+        <point x="53" y="140"></point>
+        <point x="82" y="131"></point>
+        <point x="134" y="133"></point>
+        <point x="159" y="126"></point>
+        <point x="188" y="115"></point>
+        <point x="227" y="108"></point>
+        <point x="236" y="102"></point>
+        <point x="238" y="98"></point>
+        <point x="268" y="86"></point>
+        <point x="269" y="92"></point>
+        <point x="281" y="87"></point>
+        <point x="269" y="103"></point>
+        <point x="269" y="113"></point>
+      </polygon>
+    </shape>
+    <shape name="x" rotatable="false" editableColorIndex="0">
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="270" y="75"></point>
+        <point x="225" y="30"></point>
+        <point x="30" y="225"></point>
+        <point x="75" y="270"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="30" y="75"></point>
+        <point x="75" y="30"></point>
+        <point x="270" y="225"></point>
+        <point x="225" y="270"></point>
+      </polygon>
+    </shape>
+  </turtleShapes>
+  <linkShapes>
+    <shape name="default" curviness="0.0">
+      <lines>
+        <line x="-0.2" visible="false">
+          <dash value="0.0"></dash>
+          <dash value="1.0"></dash>
+        </line>
+        <line x="0.0" visible="true">
+          <dash value="1.0"></dash>
+          <dash value="0.0"></dash>
+        </line>
+        <line x="0.2" visible="false">
+          <dash value="0.0"></dash>
+          <dash value="1.0"></dash>
+        </line>
+      </lines>
+      <indicator>
+        <shape name="link direction" rotatable="true" editableColorIndex="0">
+          <line endX="90" startY="150" marked="true" color="-1920102913" endY="180" startX="150"></line>
+          <line endX="210" startY="150" marked="true" color="-1920102913" endY="180" startX="150"></line>
+        </shape>
+      </indicator>
+    </shape>
+  </linkShapes>
+  <previewCommands>need-to-manually-make-preview-for-this-model</previewCommands>
+</model>
