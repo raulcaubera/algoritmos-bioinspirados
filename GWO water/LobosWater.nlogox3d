@@ -3,9 +3,8 @@
   <code><![CDATA[breed [ particles particle ]  ;; lobos del GWO
 
 
-
 globals [
-  ;; --- líderes del GWO ---
+  ;; líderes del GWO 
   alpha-pos          ;; vector de decisión del lobo alpha
   alpha-val          ;; fitness del lobo alpha
 
@@ -15,14 +14,21 @@ globals [
   delta-pos          ;; vector de decisión del lobo delta
   delta-val          ;; fitness del lobo delta
 
-  ;; --- datos del problema de reparto ---
+  ;; datos del problema de reparto 
   demands            ;; lista de demandas [Qr1 Qr2 ... QrN]
   total-demand       ;; suma total de demandas
   shortage-ratio     ;; available-flow / total-demand
 
-  ;; --- seguimiento ---
+  ;; seguimiento 
   best-history       ;; opcional: guardar histórico del mejor fitness
   max-ticks
+
+  ;; mejor resultado y fitness del mismo
+  global-best-pos
+  global-best-val
+  
+  num-check-gates
+  section-factors
 
 ]
 
@@ -198,16 +204,132 @@ end
 
 ;; Fitness del problema de reparto de agua
 ;; FF = (1 - PA) + (1 - PF) + PE + PD
-to-report water-fitness [qd qr-list]
+to-report water-fitness [gate-openings qr-list]
+  ;; Convertimos aperturas en caudales entregados
+  let qd compute-deliveries gate-openings
 
   let adequacy calc-PA qd qr-list
   let efficiency calc-PF qd qr-list
   let equity calc-PE qd qr-list
-  let dependability calc-PD qd qr-lisT
-
+  let dependability calc-PD qd qr-list
 
   report (1 - adequacy) + (1 - efficiency) + equity + dependability
 end
+
+;; helper
+to-report cumulative-check-factor [section-index ch-openings]
+  let factor 1
+  let j 0
+
+  while [j <= section-index] [
+    set factor factor * item j ch-openings
+    set j j + 1
+  ]
+
+  report factor
+end
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+;; --------------------------------------------------
+;; Convertir aperturas en caudales con:
+;; - flujo secuencial de aguas arriba a aguas abajo
+;; - efecto acumulativo de check gates por tramos
+;; --------------------------------------------------
+to-report compute-deliveries [gate-openings]
+
+  ;; separar aperturas de turnouts (TO) y check gates (CH)
+  let to-openings sublist gate-openings 0 num-turnouts
+  let ch-openings sublist gate-openings num-turnouts (num-turnouts + num-check-gates)
+
+  let deliveries []
+  let remaining-flow available-flow
+  let i 0
+
+  while [i < num-turnouts] [
+
+    let g_to item i to-openings
+    let q_req item i demands
+
+    ;; tramo: 2 turnouts por tramo
+    let section-index floor (i / 2)
+    if section-index >= num-check-gates [
+      set section-index (num-check-gates - 1)
+    ]
+
+    ;; efecto acumulativo de los check gates aguas arriba
+    let ch-factor cumulative-check-factor section-index ch-openings
+
+    ;; factor propio del tramo
+    let section-factor item section-index section-factors
+
+    ;; demanda "solicitada" por el turnout i
+    let requested-flow (g_to * q_req * ch-factor * section-factor)
+
+    ;; solo se entrega lo que aún queda disponible
+    let qd min (list requested-flow remaining-flow)
+    if qd < 0 [
+      set qd 0
+    ]
+
+    set deliveries lput qd deliveries
+
+    set remaining-flow remaining-flow - qd
+    if remaining-flow < 0 [
+      set remaining-flow 0
+    ]
+
+    set i i + 1
+  ]
+
+  report deliveries
+end
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 ;; inicialza dots canal
 to setup-problem-data
@@ -218,8 +340,18 @@ to setup-problem-data
     [ set shortage-ratio available-flow / total-demand ]
     [ set shortage-ratio 0 ]
 
+  set num-check-gates 3
+
+  ;; factores por tramo a partir de un único slider
+  set section-factors (list
+    1
+    (max (list 0 (1 - section-decay)))
+    (max (list 0 (1 - (2 * section-decay))))
+  )
+
   set best-history []
 end
+
 
 
 
@@ -230,6 +362,18 @@ to initialize-leaders
 end
 
 
+
+to initialize-global-best
+  set global-best-pos alpha-pos
+  set global-best-val alpha-val
+end
+
+to update-global-best
+  if better? alpha-val global-best-val [
+    set global-best-pos alpha-pos
+    set global-best-val alpha-val
+  ]
+end
 
 ;; Actualiza alpha/beta/delta con un candidato dado
 ;; Recibe 
@@ -266,8 +410,6 @@ to update-leaders-with [candidate-fitness candidate-pos]
 end
   
 
-
-
 to setup
   clear-all
 
@@ -280,6 +422,7 @@ to setup
   ;; Inicializar población y líderes
   initialize-particles
   initialize-leaders
+  initialize-global-best
 
   reset-ticks
 end
@@ -292,15 +435,14 @@ end
 to initialize-particles
   create-particles population-size [
 
-    ;; Generar una solución inicial factible
-    set decision-vector random-feasible-allocation demands available-flow
+    ;; aperturas iniciales:
+    ;; [TO1..TO6  CH1..CH3]
+    set decision-vector n-values (num-turnouts + num-check-gates) [
+      random-float 1.0
+    ]
 
-    ;; Evaluar fitness con la nueva función del problema
     set fitness water-fitness decision-vector demands
-
-    ;; No necesitamos visualización espacial
     hide-turtle
-    pen-up
   ]
 end
 
@@ -332,8 +474,6 @@ to update-alpha-beta-delta
     ]
   ]
 end
-
-
 
 
 
@@ -383,7 +523,9 @@ to-report gwo-next-position [current-pos a]
   ]
 
   ;; Aplicar restricciones del problema
-  set new-pos enforce-constraints new-pos demands available-flow
+  ;; mantener aperturas en [0,1]
+  set new-pos map [x -> min list 1 max list 0 x] new-pos
+
 
   report new-pos
 end
@@ -422,9 +564,10 @@ to go
 
   ;; actualizar líderes
   update-alpha-beta-delta
+  update-global-best
 
-  ;; guardar histórico del mejor fitness
-  set best-history lput alpha-val best-history
+  ;; guardar histórico del mejor fitness global
+  set best-history lput global-best-val best-history
 
   tick
 end]]></code>
@@ -434,27 +577,28 @@ end]]></code>
     <button x="240" y="174" height="44" disableUntilTicks="false" forever="true" kind="Observer" width="124" display="EJECUTAR GWO">go</button>
     <button x="241" y="120" height="46" disableUntilTicks="false" forever="false" kind="Observer" width="106" display="STEP by STEP">go</button>
     <slider x="381" step="1" y="48" max="100" width="174" display="population-size" height="50" min="1" direction="Horizontal" default="75.0" variable="population-size"></slider>
-    <slider x="20" step="1" y="50" max="20" width="198" display="num-turnouts" height="54" min="3" direction="Horizontal" default="6.0" variable="num-turnouts"></slider>
-    <chooser x="20" y="250" height="60" variable="demand-pattern" current="0" width="196" display="demand-pattern">
+    <slider x="383" step="5000" y="117" max="100000" width="172" display="evaluation-budget" height="50" min="10000" direction="Horizontal" default="10000.0" variable="evaluation-budget"></slider>
+    <monitor x="393" precision="17" y="178" height="64" fontSize="11" width="320" display="Best solution">global-best-pos</monitor>
+    <monitor x="392" precision="17" y="251" height="60" fontSize="11" width="100" display="Best fitness">global-best-val</monitor>
+    <monitor x="509" precision="17" y="251" height="60" fontSize="11" width="100" display="Iteration">ticks</monitor>
+    <plot x="728" autoPlotX="true" yMax="10.0" autoPlotY="true" yAxis="fitness" y="43" xMin="0.0" height="216" legend="true" xMax="10.0" yMin="0.0" width="317" xAxis="iteration" display="plot 1">
+      <setup></setup>
+      <update></update>
+      <pen interval="1.0" mode="0" display="mean" color="-10899396" legend="true">
+        <setup>clear-plot</setup>
+        <update>plotxy ticks global-best-val</update>
+      </pen>
+    </plot>
+    <slider x="15" step="1" y="12" max="20" width="198" display="num-turnouts" height="54" min="3" direction="Horizontal" default="6.0" variable="num-turnouts"></slider>
+    <chooser x="15" y="212" height="60" variable="demand-pattern" current="0" width="196" display="demand-pattern">
       <choice type="string" value="uniform"></choice>
       <choice type="string" value="random"></choice>
       <choice type="string" value="upstream-heavy"></choice>
       <choice type="string" value="downstream-heavy"></choice>
     </chooser>
-    <slider x="383" step="5000" y="117" max="100000" width="172" display="evaluation-budget" height="50" min="10000" direction="Horizontal" default="10000.0" variable="evaluation-budget"></slider>
-    <slider x="19" step="0.1" y="187" max="5" width="200" display="available-flow" height="50" min="0.1" direction="Horizontal" default="1.2" variable="available-flow"></slider>
-    <slider x="19" step="0.01" y="120" max="1" width="199" display="base-demand" height="50" min="0.01" direction="Horizontal" default="0.02" variable="base-demand"></slider>
-    <monitor x="393" precision="17" y="178" height="64" fontSize="11" width="320" display="Best solution">alpha-pos</monitor>
-    <monitor x="392" precision="17" y="251" height="60" fontSize="11" width="100" display="Best fitness">alpha-val</monitor>
-    <plot x="138" autoPlotX="true" yMax="10.0" autoPlotY="true" yAxis="fitness" y="353" xMin="0.0" height="216" legend="true" xMax="10.0" yMin="0.0" width="317" xAxis="iteration" display="plot 1">
-      <setup></setup>
-      <update></update>
-      <pen interval="1.0" mode="0" display="mean" color="-10899396" legend="true">
-        <setup>clear-plot</setup>
-        <update>plotxy ticks alpha-val</update>
-      </pen>
-    </plot>
-    <monitor x="509" precision="17" y="251" height="60" fontSize="11" width="100" display="Iteration">ticks</monitor>
+    <slider x="14" step="0.1" y="149" max="5" width="200" display="available-flow" height="50" min="0.1" direction="Horizontal" default="0.8" variable="available-flow"></slider>
+    <slider x="14" step="0.01" y="82" max="1" width="199" display="base-demand" height="50" min="0.01" direction="Horizontal" default="0.2" variable="base-demand"></slider>
+    <slider x="13" step="0.005" y="278" max="0.08" width="201" display="section-decay" height="50" min="0" direction="Horizontal" default="0.03" variable="section-decay"></slider>
   </widgets>
   <info>## ¿QUÉ ES?
 
