@@ -33,12 +33,16 @@ globals [
   turnout-gains
   check-head-sensitivity
   
+  sim-steps
+  head-memory
+  local-utilization-weight
+  
+  target-heads
+  dead-band-ratio
+
+  
 ]
 
-
-patches-own [
-  elevation     ;; valor FITNESS asociado a cada parcela (patch)
-]
 
 
 
@@ -208,16 +212,16 @@ end
 ;; Fitness del problema de reparto de agua
 ;; FF = (1 - PA) + (1 - PF) + PE + PD
 to-report water-fitness [gate-openings qr-list]
-  ;; Convertimos aperturas en caudales entregados
-  let qd compute-deliveries gate-openings
+  let history simulate-delivery-history gate-openings
 
-  let adequacy calc-PA qd qr-list
-  let efficiency calc-PF qd qr-list
-  let equity calc-PE qd qr-list
-  let dependability calc-PD qd qr-list
+  let adequacy calc-PA-history history qr-list
+  let efficiency calc-PF-history history qr-list
+  let equity calc-PE-history history qr-list
+  let dependability calc-PD-history history qr-list
 
   report (1 - adequacy) + (1 - efficiency) + equity + dependability
 end
+
 
 ;; helper
 to-report cumulative-check-factor [section-index ch-openings]
@@ -235,111 +239,490 @@ end
 
 
 
-
-
-
-
-
-
 ;; --------------------------------------------------
-;; Convertir aperturas en caudales con:
-;; - reparto por tramos
-;; - heterogeneidad por section-factors
-;; - tradeoff de check gates
-;; - "head" local simplificado por tramo
+;; Simulación temporal mínima del canal:
+;; devuelve TODA la historia temporal de entregas
+;; history = lista de pasos, cada paso = lista de 6 entregas
 ;; --------------------------------------------------
-to-report compute-deliveries [gate-openings]
+to-report simulate-delivery-history [gate-openings]
 
   ;; separar TO y CH
   let to-openings sublist gate-openings 0 num-turnouts
   let ch-openings sublist gate-openings num-turnouts (num-turnouts + num-check-gates)
 
-  let deliveries n-values num-turnouts [0]
-  let remaining-flow available-flow
-  let section 0
+  ;; estado hidráulico simplificado de cada tramo
+  let section-heads n-values num-check-gates [1]
 
-  while [section < num-check-gates] [
+  let history []
+  let t 0
 
-    let g_ch item section ch-openings
-    let section-factor item section section-factors
+  while [t < sim-steps] [
 
-    ;; efecto local del check gate:
-    ;; más cerrado -> más "head" local
-    let local-head-factor (1 + check-head-sensitivity * (1 - g_ch))
+    let step-deliveries n-values num-turnouts [0]
+    let remaining-flow available-flow
+    let new-section-heads n-values num-check-gates [1]
 
-    ;; efecto aguas abajo del check gate:
-    ;; más abierto -> pasa mejor el flujo al siguiente tramo
-    let downstream-pass-factor (section-factor * ((1 - check-tradeoff) + (check-tradeoff * g_ch)))
+    let section 0
+    while [section < num-check-gates] [
 
-    ;; dos turnouts por tramo
-    let first-index (section * 2)
-    let last-index (min (list num-turnouts (first-index + 2)))
+      let g_ch item section ch-openings
+      let section-factor item section section-factors
+      let prev-head item section section-heads
 
-    ;; 1) calcular cuánto "quieren" recibir los TO del tramo
-    let requested-list []
-    let local-requested-total 0
-    let i first-index
+      ;; más cerrado el CH -> más "head" local
+      let local-head-factor (section-factor * prev-head * (1 + check-head-sensitivity * (1 - g_ch)))
 
-    while [i < last-index] [
-      let g_to item i to-openings
-      let q_req item i demands
-      let turnout-gain item i turnout-gains
+      ;; más abierto el CH -> mejor paso al siguiente tramo
+      let downstream-pass-factor (section-factor * ((1 - check-tradeoff) + (check-tradeoff * g_ch)))
 
-      let requested-flow (min (list q_req (g_to * turnout-gain * q_req * local-head-factor)))
+      ;; índices de los dos turnouts del tramo
+      let first-index (section * 2)
+      let last-index (min (list num-turnouts (first-index + 2)))
 
-      set requested-list lput requested-flow requested-list
-      set local-requested-total (local-requested-total + requested-flow)
+      ;; 1) calcular lo que quieren recibir los turnouts del tramo
+      let requested-list []
+      let local-requested-total 0
+      let i first-index
 
-      set i (i + 1)
+      while [i < last-index] [
+        let g_to item i to-openings
+        let q_req item i demands
+        let turnout-gain item i turnout-gains
+
+        let requested-flow (min (list q_req (g_to * turnout-gain * q_req * local-head-factor)))
+
+        set requested-list lput requested-flow requested-list
+        set local-requested-total (local-requested-total + requested-flow)
+
+        set i (i + 1)
+      ]
+
+      ;; 2) repartir proporcionalmente dentro del tramo
+      let section-inflow remaining-flow
+      let section-delivery-total (min (list section-inflow local-requested-total))
+
+      let scale 0
+      if local-requested-total > 0 [
+        set scale (section-delivery-total / local-requested-total)
+      ]
+
+      set i first-index
+      let k 0
+
+      while [i < last-index] [
+        let qd ((item k requested-list) * scale)
+        set step-deliveries replace-item i step-deliveries qd
+
+        set i (i + 1)
+        set k (k + 1)
+      ]
+
+      ;; 3) actualizar "head" del tramo con memoria temporal
+      let utilization 0
+      if section-inflow > 0 [
+        set utilization (section-delivery-total / section-inflow)
+      ]
+
+      let target-head (1 + check-head-sensitivity * (1 - g_ch) + local-utilization-weight * utilization)
+      let updated-head ((head-memory * prev-head) + ((1 - head-memory) * target-head))
+
+      set new-section-heads replace-item section new-section-heads updated-head
+
+      ;; 4) lo no entregado sigue al tramo siguiente
+      set remaining-flow (section-inflow - section-delivery-total)
+      if remaining-flow < 0 [
+        set remaining-flow 0
+      ]
+
+      set remaining-flow (remaining-flow * downstream-pass-factor)
+
+      set section (section + 1)
     ]
 
-    ;; 2) repartir el flujo disponible en el tramo de forma proporcional
-    let section-inflow remaining-flow
-    let section-delivery-total (min (list section-inflow local-requested-total))
+    ;; guardar el paso temporal
+    set history lput step-deliveries history
 
-    let scale 0
-    if local-requested-total > 0 [
-      set scale (section-delivery-total / local-requested-total)
-    ]
-
-    set i first-index
-    let k 0
-
-    while [i < last-index] [
-      let qd ((item k requested-list) * scale)
-      set deliveries replace-item i deliveries qd
-
-      set i (i + 1)
-      set k (k + 1)
-    ]
-
-    ;; 3) lo que sobra sigue hacia el siguiente tramo
-    set remaining-flow (section-inflow - section-delivery-total)
-    if remaining-flow < 0 [
-      set remaining-flow 0
-    ]
-
-    set remaining-flow (remaining-flow * downstream-pass-factor)
-
-    set section (section + 1)
+    ;; pasar al siguiente paso
+    set section-heads new-section-heads
+    set t (t + 1)
   ]
 
-  report deliveries
+  report history
+end
+
+
+;; --------------------------------------------------
+;; Historia temporal de "head" por tramo
+;; cada paso = [head1 head2 head3]
+;; --------------------------------------------------
+to-report simulate-head-history [gate-openings]
+
+  ;; separar TO y CH
+  let to-openings sublist gate-openings 0 num-turnouts
+  let ch-openings sublist gate-openings num-turnouts (num-turnouts + num-check-gates)
+
+  let section-heads n-values num-check-gates [1]
+  let head-history []
+
+  let t 0
+  while [t < sim-steps] [
+
+    let remaining-flow available-flow
+    let new-section-heads n-values num-check-gates [1]
+
+    let section 0
+    while [section < num-check-gates] [
+
+      let g_ch item section ch-openings
+      let section-factor item section section-factors
+      let prev-head item section section-heads
+
+      ;; más cerrado el CH -> más "head" local
+      let local-head-factor (section-factor * prev-head * (1 + check-head-sensitivity * (1 - g_ch)))
+
+      ;; más abierto el CH -> mejor paso al siguiente tramo
+      let downstream-pass-factor (section-factor * ((1 - check-tradeoff) + (check-tradeoff * g_ch)))
+
+      ;; índices de los dos turnouts del tramo
+      let first-index (section * 2)
+      let last-index (min (list num-turnouts (first-index + 2)))
+
+      ;; 1) calcular lo que quieren recibir los turnouts del tramo
+      let local-requested-total 0
+      let i first-index
+
+      while [i < last-index] [
+        let g_to item i to-openings
+        let q_req item i demands
+        let turnout-gain item i turnout-gains
+
+        let requested-flow (min (list q_req (g_to * turnout-gain * q_req * local-head-factor)))
+        set local-requested-total (local-requested-total + requested-flow)
+
+        set i (i + 1)
+      ]
+
+      ;; 2) repartir proporcionalmente dentro del tramo
+      let section-inflow remaining-flow
+      let section-delivery-total (min (list section-inflow local-requested-total))
+
+      ;; 3) actualizar "head" del tramo con memoria temporal
+      let utilization 0
+      if section-inflow > 0 [
+        set utilization (section-delivery-total / section-inflow)
+      ]
+
+      let target-head (1 + check-head-sensitivity * (1 - g_ch) + local-utilization-weight * utilization)
+      let updated-head ((head-memory * prev-head) + ((1 - head-memory) * target-head))
+
+      set new-section-heads replace-item section new-section-heads updated-head
+
+      ;; 4) lo no entregado sigue al tramo siguiente
+      set remaining-flow (section-inflow - section-delivery-total)
+      if remaining-flow < 0 [
+        set remaining-flow 0
+      ]
+
+      set remaining-flow (remaining-flow * downstream-pass-factor)
+
+      set section (section + 1)
+    ]
+
+    ;; guardar heads del paso
+    set head-history lput new-section-heads head-history
+
+    set section-heads new-section-heads
+    set t (t + 1)
+  ]
+
+  report head-history
+end
+
+
+
+;; --------------------------------------------------
+;; Entregas medias a partir de la historia temporal
+;; --------------------------------------------------
+to-report compute-deliveries [gate-openings]
+  let history simulate-delivery-history gate-openings
+
+  let totals n-values num-turnouts [0]
+  let t 0
+
+  while [t < length history] [
+    let step item t history
+
+    let i 0
+    while [i < num-turnouts] [
+      let old-total item i totals
+      let qd item i step
+      set totals replace-item i totals (old-total + qd)
+      set i (i + 1)
+    ]
+
+    set t (t + 1)
+  ]
+
+  let avg-deliveries []
+  let i 0
+  while [i < num-turnouts] [
+    set avg-deliveries lput ((item i totals) / (length history)) avg-deliveries
+    set i (i + 1)
+  ]
+
+  report avg-deliveries
+end
+
+
+;; MAE (Mean Absolute Error - Error Absoluto Medio)
+;; Que tan lejos estamos del valor real
+
+to-report calc-head-MAE [head-history]
+  let max-error 0
+  let t 0
+
+  while [t < length head-history] [
+    let step item t head-history
+    let s 0
+
+    while [s < num-check-gates] [
+      let h item s step
+      let h-target item s target-heads
+
+      if h-target > 0 [
+        let rel-error abs (h - h-target) / h-target
+        if rel-error > max-error [
+          set max-error rel-error
+        ]
+      ]
+
+      set s (s + 1)
+    ]
+
+    set t (t + 1)
+  ]
+
+  report max-error
+end
+
+
+
+;; IAE (Integral of Absolute Error - Integral del Error Absoluto)
+;; Métrica acumulativa que mide el área total del error a lo largo del tiempo. 
+;; No solo cuánto te equivocas, sino cuánto tiempo permaneces equivocado.
+to-report calc-head-IAE [head-history]
+  let total-error 0
+  let sample-count 0
+  let t 0
+
+  while [t < length head-history] [
+    let step item t head-history
+    let s 0
+
+    while [s < num-check-gates] [
+      let h item s step
+      let h-target item s target-heads
+
+      if h-target > 0 [
+        let rel-error abs (h - h-target) / h-target
+        set total-error (total-error + rel-error)
+        set sample-count (sample-count + 1)
+      ]
+
+      set s (s + 1)
+    ]
+
+    set t (t + 1)
+  ]
+
+  if sample-count = 0 [ report 0 ]
+  report total-error / sample-count
 end
 
 
 
 
 
+;; Dead-band (Banda Muerta)
+;; umbral de tolerancia, rango alrededor del valor objetivo donde se decide no hacer nada
+to-report calc-deadband-violation-rate [head-history]
+  let violations 0
+  let sample-count 0
+  let t 0
+
+  while [t < length head-history] [
+    let step item t head-history
+    let s 0
+
+    while [s < num-check-gates] [
+      let h item s step
+      let h-target item s target-heads
+
+      if h-target > 0 [
+        let rel-error abs (h - h-target) / h-target
+        if rel-error > dead-band-ratio [
+          set violations (violations + 1)
+        ]
+        set sample-count (sample-count + 1)
+      ]
+
+      set s (s + 1)
+    ]
+
+    set t (t + 1)
+  ]
+
+  if sample-count = 0 [ report 0 ]
+  report violations / sample-count
+end
+
+
+
+
+;;
+;; MOSTRAR RESULTADOS
+;;
+to print-best-results
+  let best-pos global-best-pos
+  let delivery-history simulate-delivery-history best-pos
+  let avg-deliveries compute-deliveries best-pos
+  let head-history simulate-head-history best-pos
+
+  let adequacy calc-PA-history delivery-history demands
+  let efficiency calc-PF-history delivery-history demands
+  let equity calc-PE-history delivery-history demands
+  let dependability calc-PD-history delivery-history demands
+
+  let mae calc-head-MAE head-history
+  let iae calc-head-IAE head-history
+  let deadband-violation-rate calc-deadband-violation-rate head-history
+
+  print "----------------------------------------"
+  print "BEST SOLUTION SUMMARY"
+  print (word "Best openings (TO1..TO6, CH1..CH3): " best-pos)
+  print (word "Average deliveries: " avg-deliveries)
+  print (word "Best fitness: " precision global-best-val 6)
+  print (word "PA: " precision adequacy 6)
+  print (word "PF: " precision efficiency 6)
+  print (word "PE: " precision equity 6)
+  print (word "PD: " precision dependability 6)
+  print (word "MAE: " precision mae 6)
+  print (word "IAE: " precision iae 6)
+  print (word "Dead-band violation rate: " precision deadband-violation-rate 6)
+  print "----------------------------------------"
+end
 
 
 
 
 
+to-report calc-PA-history [history qr-list]
+  let total-score 0
+  let t 0
+
+  while [t < length history] [
+    let step item t history
+    let i 0
+
+    while [i < length qr-list] [
+      let d item i step
+      let r item i qr-list
+
+      ifelse r > 0
+        [ set total-score (total-score + min (list 1 (d / r))) ]
+        [ set total-score (total-score + 1) ]
+
+      set i (i + 1)
+    ]
+
+    set t (t + 1)
+  ]
+
+  report total-score / ((length history) * (length qr-list))
+end
+
+
+to-report calc-PF-history [history qr-list]
+  let total-score 0
+  let t 0
+
+  while [t < length history] [
+    let step item t history
+    let i 0
+
+    while [i < length qr-list] [
+      let d item i step
+      let r item i qr-list
+
+      ifelse d > 0
+        [ set total-score (total-score + min (list 1 (r / d))) ]
+        [ set total-score (total-score + 1) ]
+
+      set i (i + 1)
+    ]
+
+    set t (t + 1)
+  ]
+
+  report total-score / ((length history) * (length qr-list))
+end
+
+
+to-report calc-PE-history [history qr-list]
+  let total-pe 0
+  let t 0
+
+  while [t < length history] [
+    let step item t history
+    let ratios []
+    let i 0
+
+    while [i < length qr-list] [
+      let d item i step
+      let r item i qr-list
+
+      ifelse r > 0
+        [ set ratios lput (d / r) ratios ]
+        [ set ratios lput 1 ratios ]
+
+      set i (i + 1)
+    ]
+
+    set total-pe (total-pe + coeff-variation ratios)
+    set t (t + 1)
+  ]
+
+  report total-pe / (length history)
+end
 
 
 
+to-report calc-PD-history [history qr-list]
+  let total-pd 0
+  let i 0
 
+  while [i < length qr-list] [
+    let ratios []
+    let r item i qr-list
+    let t 0
+
+    while [t < length history] [
+      let step item t history
+      let d item i step
+
+      ifelse r > 0
+        [ set ratios lput (d / r) ratios ]
+        [ set ratios lput 1 ratios ]
+
+      set t (t + 1)
+    ]
+
+    set total-pd (total-pd + coeff-variation ratios)
+    set i (i + 1)
+  ]
+
+  report total-pd / (length qr-list)
+end
 
 
 
@@ -368,24 +751,31 @@ to setup-problem-data
 
   set num-check-gates 3
 
-  ;; factores por tramo a partir de un único slider
+  ;; factores por tramo
   set section-factors (list
     1
     (max (list 0 (1 - section-decay)))
     (max (list 0 (1 - (2 * section-decay))))
   )
-  
-  
-  ;; compensación local vs paso aguas abajo en los check gates
-  set check-tradeoff 0.3
 
+  ;; tradeoff del check gate: prioridad local vs paso aguas abajo
+  set check-tradeoff 0.3
 
   ;; sensibilidad del "head" local al check gate
   set check-head-sensitivity 0.35
 
-  
   ;; distinta sensibilidad por turnout
   set turnout-gains (list 1.04 0.98 1.03 0.97 1.02 0.96)
+
+  ;; nuevos parámetros temporales
+  set sim-steps 12
+  set head-memory 0.65
+  set local-utilization-weight 0.25
+  
+  
+  ;; métricas hidráulicas tipo paper
+  set target-heads (list 1 1 1)
+  set dead-band-ratio 0.2
 
 
   set best-history []
@@ -612,15 +1002,8 @@ to go
 end]]></code>
   <widgets>
     <view3d wrappingAllowedZ="true" x="0" wrappingAllowedX="true" y="0" minPycor="-20" height="255" showTickCounter="true" patchSize="6.0" fontSize="10" wrappingAllowedY="true" width="254" tickCounterLabel="ticks" maxPycor="20" updateMode="1" frameRate="30.0" maxPzcor="20" maxPxcor="20" minPxcor="-20" minPzcor="0"></view3d>
-    <button x="241" y="65" height="47" disableUntilTicks="false" forever="false" kind="Observer" width="102" display="SETUP GWO">setup</button>
-    <button x="240" y="174" height="44" disableUntilTicks="false" forever="true" kind="Observer" width="124" display="EJECUTAR GWO">go</button>
-    <button x="241" y="120" height="46" disableUntilTicks="false" forever="false" kind="Observer" width="106" display="STEP by STEP">go</button>
-    <slider x="381" step="1" y="48" max="100" width="174" display="population-size" height="50" min="1" direction="Horizontal" default="70.0" variable="population-size"></slider>
-    <slider x="383" step="5000" y="117" max="100000" width="172" display="evaluation-budget" height="50" min="10000" direction="Horizontal" default="50000.0" variable="evaluation-budget"></slider>
-    <monitor x="393" precision="17" y="178" height="64" fontSize="11" width="320" display="Best solution">global-best-pos</monitor>
-    <monitor x="392" precision="17" y="251" height="60" fontSize="11" width="100" display="Best fitness">global-best-val</monitor>
-    <monitor x="509" precision="17" y="251" height="60" fontSize="11" width="100" display="Iteration">ticks</monitor>
-    <plot x="728" autoPlotX="true" yMax="10.0" autoPlotY="true" yAxis="fitness" y="43" xMin="0.0" height="216" legend="true" xMax="10.0" yMin="0.0" width="317" xAxis="iteration" display="plot 1">
+    <slider x="381" step="1" y="4" max="100" width="174" display="population-size" height="50" min="1" direction="Horizontal" default="70.0" variable="population-size"></slider>
+    <plot x="245" autoPlotX="true" yMax="10.0" autoPlotY="true" yAxis="fitness" y="273" xMin="0.0" height="216" legend="true" xMax="10.0" yMin="0.0" width="317" xAxis="iteration" display="plot 1">
       <setup></setup>
       <update></update>
       <pen interval="1.0" mode="0" display="mean" color="-10899396" legend="true">
@@ -628,16 +1011,23 @@ end]]></code>
         <update>plotxy ticks global-best-val</update>
       </pen>
     </plot>
-    <slider x="15" step="1" y="12" max="20" width="198" display="num-turnouts" height="54" min="3" direction="Horizontal" default="6.0" variable="num-turnouts"></slider>
-    <chooser x="15" y="212" height="60" variable="demand-pattern" current="0" width="196" display="demand-pattern">
+    <monitor x="509" precision="17" y="207" height="60" fontSize="11" width="100" display="Iteration">ticks</monitor>
+    <monitor x="392" precision="17" y="207" height="60" fontSize="11" width="100" display="Best fitness">global-best-val</monitor>
+    <monitor x="393" precision="17" y="134" height="64" fontSize="11" width="320" display="Best solution">global-best-pos</monitor>
+    <slider x="383" step="5000" y="73" max="100000" width="172" display="evaluation-budget" height="50" min="10000" direction="Horizontal" default="50000.0" variable="evaluation-budget"></slider>
+    <button x="241" y="76" height="46" disableUntilTicks="false" forever="false" kind="Observer" width="106" display="STEP by STEP">go</button>
+    <button x="240" y="130" height="44" disableUntilTicks="false" forever="true" kind="Observer" width="124" display="EJECUTAR GWO">go</button>
+    <button x="241" y="21" height="47" disableUntilTicks="false" forever="false" kind="Observer" width="102" display="SETUP GWO">setup</button>
+    <slider x="5" step="1" y="4" max="20" width="198" display="num-turnouts" height="54" min="3" direction="Horizontal" default="6.0" variable="num-turnouts"></slider>
+    <slider x="3" step="0.005" y="270" max="0.08" width="201" display="section-decay" height="50" min="0" direction="Horizontal" default="0.03" variable="section-decay"></slider>
+    <slider x="4" step="0.01" y="74" max="1" width="199" display="base-demand" height="50" min="0.01" direction="Horizontal" default="0.2" variable="base-demand"></slider>
+    <slider x="4" step="0.1" y="141" max="5" width="200" display="available-flow" height="50" min="0.1" direction="Horizontal" default="0.8" variable="available-flow"></slider>
+    <chooser x="5" y="204" height="60" variable="demand-pattern" current="0" width="196" display="demand-pattern">
       <choice type="string" value="uniform"></choice>
       <choice type="string" value="random"></choice>
       <choice type="string" value="upstream-heavy"></choice>
       <choice type="string" value="downstream-heavy"></choice>
     </chooser>
-    <slider x="14" step="0.1" y="149" max="5" width="200" display="available-flow" height="50" min="0.1" direction="Horizontal" default="0.8" variable="available-flow"></slider>
-    <slider x="14" step="0.01" y="82" max="1" width="199" display="base-demand" height="50" min="0.01" direction="Horizontal" default="0.2" variable="base-demand"></slider>
-    <slider x="13" step="0.005" y="278" max="0.08" width="201" display="section-decay" height="50" min="0" direction="Horizontal" default="0.03" variable="section-decay"></slider>
   </widgets>
   <info>## ¿QUÉ ES?
 
