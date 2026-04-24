@@ -4,57 +4,75 @@
 
 
 globals [
-  ;; líderes del GWO 
-  alpha-pos          ;; vector de decisión del lobo alpha
+  ;; -----------------------------
+  ;; Líderes del algoritmo GWO
+  ;; -----------------------------
+  alpha-pos          ;; mejor vector de aperturas encontrado en la iteración actual
   alpha-val          ;; fitness del lobo alpha
 
-  beta-pos           ;; vector de decisión del lobo beta
-  beta-val           ;; fitness del lobo beta
+  beta-pos           ;; segundo mejor vector de aperturas
+  beta-val
 
-  delta-pos          ;; vector de decisión del lobo delta
-  delta-val          ;; fitness del lobo delta
+  delta-pos          ;; tercer mejor vector de aperturas
+  delta-val
 
-  ;; datos del problema de reparto 
-  demands            ;; lista de demandas [Qr1 Qr2 ... QrN]
+  ;; -----------------------------
+  ;; Mejor solución global
+  ;; -----------------------------
+  global-best-pos    ;; mejor vector encontrado en toda la ejecución
+  global-best-val    ;; fitness asociado al mejor global
+
+  ;; -----------------------------
+  ;; Datos del problema de reparto
+  ;; -----------------------------
+  demands            ;; demandas requeridas por turnout [Qr1 ... QrN]
   total-demand       ;; suma total de demandas
   shortage-ratio     ;; available-flow / total-demand
 
-  ;; seguimiento 
-  best-history       ;; opcional: guardar histórico del mejor fitness
-  max-ticks
-
-  ;; mejor resultado y fitness del mismo
-  global-best-pos
-  global-best-val
-  
+  ;; -----------------------------
+  ;; Parámetros del canal simplificado
+  ;; -----------------------------
   num-check-gates
   section-factors
   check-tradeoff
   turnout-gains
   check-head-sensitivity
-  
+
+  ;; -----------------------------
+  ;; Parámetros temporales de simulación
+  ;; -----------------------------
   sim-steps
   head-memory
   local-utilization-weight
-  
+
+  ;; -----------------------------
+  ;; Parámetros de evaluación hidráulica
+  ;; -----------------------------
   target-heads
   dead-band-ratio
 
-  
-]
+  ;; -----------------------------
+  ;; Seguimiento de la ejecución
+  ;; -----------------------------
+  best-history
+  max-ticks
+  ;; datos cacheados para la interfaz
+  ui-average-deliveries
+  ui-adequacy
+  ui-equity
+  ui-dependability
 
+]
 
 
 
 turtles-own [
   fitness
-  decision-vector   ;; vector de reparto [Q1 Q2 ... QN]
+  decision-vector   ;; vector de aperturas [TO1..TO6 CH1..
 ]
 
 
-
-
-
+;; Helpers 
 
 to-report better? [a b]
   ;; En este problema SIEMPRE minimizamos
@@ -67,11 +85,14 @@ to-report worst-sentinel
 end
 
 
-;; =========================================================
-;; NUEVAS FUNCIONES DEL PROBLEMA DE REPARTO DE AGUA
-;; =========================================================
 
-;; Construye el vector de demandas en función de la interfaz
+
+
+;; -----------------------------------------------------------------------------------------
+;; Construye el vector de demandas Qr según el patrón elegido en la interfaz.
+;; Este procedimiento solo define "quién pide cuánto", no el agua que finalmente se entrega.
+;; -----------------------------------------------------------------------------------------
+
 to-report build-demands
   let qs []
 
@@ -113,137 +134,70 @@ to-report build-demands
 end
 
 
-;; Genera una asignación inicial aleatoria y factible
-to-report random-feasible-allocation [qr-list q-available]
-  let raw []
-  repeat length qr-list [
-    set raw lput (random-float 1.0) raw
-  ]
+;; =========================================================
+;; SETUP DATOS inicializa datos del problema
+;; =========================================================
+to setup-problem-data
+  set demands build-demands
+  set total-demand sum demands
 
-  let s sum raw
-  if s = 0 [
-    set raw map [q -> 1] qr-list
-    set s sum raw
-  ]
+  ifelse total-demand > 0
+    [ set shortage-ratio available-flow / total-demand ]
+    [ set shortage-ratio 0 ]
 
-  ;; Escalamos al caudal disponible
-  let alloc map [x -> x * q-available / s] raw
+  set num-check-gates 3
 
-  ;; Limitamos por demanda máxima
-  set alloc (map [[a q] -> min (list a q)] alloc qr-list)
+  ;; factores por tramo
+  set section-factors (list
+    1
+    (max (list 0 (1 - section-decay)))
+    (max (list 0 (1 - (2 * section-decay))))
+  )
+
+  ;; tradeoff del check gate: prioridad local vs paso aguas abajo
+  set check-tradeoff 0.3
+
+  ;; sensibilidad del "head" local al check gate
+  set check-head-sensitivity 0.35
+
+  ;; distinta sensibilidad por turnout
+  set turnout-gains (list 1.04 0.98 1.03 0.97 1.02 0.96)
+
+  ;; nuevos parámetros temporales
+  set sim-steps 12
+  set head-memory 0.65
+  set local-utilization-weight 0.25
   
-  ;; Si tras cortar por demanda sobra agua, de momento la dejamos sin usar
-  report alloc
+  
+  ;; métricas hidráulicas tipo paper
+  set target-heads (list 1 1 1)
+  set dead-band-ratio 0.2
+
+
+  set best-history []
 end
 
 
-;; Garantiza restricciones de factibilidad
-to-report enforce-constraints [qd qr-list q-available]
-  ;; 1) no negatividad
-  let corrected map [x -> max (list 0 x)] qd
-
-  ;; 2) no superar demanda
-  set corrected (map [[a q] -> min (list a q)] corrected qr-list)
-
-  ;; 3) suma total <= available-flow
-  let s sum corrected
-  if s > q-available and s > 0 [
-    set corrected map [x -> x * q-available / s] corrected
-  ]
-
-  report corrected
-end
-
-
-;; Coeficiente de variación
-to-report coeff-variation [xs]
-  if empty? xs [ report 0 ]
-  let m mean xs
-  if m = 0 [ report 0 ]
-
-  let var mean map [x -> (x - m) ^ 2] xs
-  report (sqrt var) / m
-end
-
-
-;; Adecuación PA
-to-report calc-PA [qd qr-list]
-  let s 0
-  (foreach qd qr-list [[d r] ->
-    ifelse r > 0
-      [ set s s + min (list 1 (d / r)) ]
-      [ set s s + 1 ]
-  ])
-  report s / length qr-list
-end
-
-
-;; Eficiencia PF
-to-report calc-PF [qd qr-list]
-  let s 0
-  (foreach qd qr-list [[d r] ->
-    ifelse d > 0
-      [ set s s + min (list 1 (r / d)) ]
-      [ set s s + 1 ]
-  ])
-  report s / length qr-list
-end
-
-
-;; Equidad PE = coeficiente de variación de Qd/Qr
-to-report calc-PE [qd qr-list]
-  let ratios []
-  (foreach qd qr-list [[d r] ->
-    ifelse r > 0
-      [ set ratios lput (d / r) ratios ]
-      [ set ratios lput 1 ratios ]
-  ])
-  report coeff-variation ratios
-end
-
-
-;; Dependabilidad PD
-;; De momento la dejamos en 0 porque aún no modelamos la dimensión temporal.
-to-report calc-PD [qd qr-list]
-  report 0
-end
-
-
-;; Fitness del problema de reparto de agua
-;; FF = (1 - PA) + (1 - PF) + PE + PD
-to-report water-fitness [gate-openings qr-list]
-  let history simulate-delivery-history gate-openings
-
-  let adequacy calc-PA-history history qr-list
-  let efficiency calc-PF-history history qr-list
-  let equity calc-PE-history history qr-list
-  let dependability calc-PD-history history qr-list
-
-  report (1 - adequacy) + (1 - efficiency) + equity + dependability
-end
-
-
-;; helper
-to-report cumulative-check-factor [section-index ch-openings]
-  let factor 1
-  let j 0
-
-  while [j <= section-index] [
-    set factor factor * item j ch-openings
-    set j j + 1
-  ]
-
-  report factor
-end
-
-
-
+;; =========================================================
+;; SIMULACION DEL CANAL
+;; =========================================================
 
 ;; --------------------------------------------------
-;; Simulación temporal mínima del canal:
-;; devuelve TODA la historia temporal de entregas
-;; history = lista de pasos, cada paso = lista de 6 entregas
-;; --------------------------------------------------
+;; Simulación temporal simplificada del canal.
+;;
+;; Entrada:
+;;   gate-openings = vector de aperturas [TO1..TO6 CH1..CH3]
+;;
+;; Salida:
+;;   history = lista de pasos temporales; cada paso contiene
+;;   las entregas en los 6 turnouts.
+;;
+;; Idea:
+;; - cada tramo tiene un "head" simplificado
+;; - los check gates afectan al head local y al paso aguas abajo
+;; - el reparto se simula durante varios pasos de tiempo
+;; ------------------------------------------------
+
 to-report simulate-delivery-history [gate-openings]
 
   ;; separar TO y CH
@@ -352,9 +306,16 @@ end
 
 
 ;; --------------------------------------------------
-;; Historia temporal de "head" por tramo
-;; cada paso = [head1 head2 head3]
+;; Simula la historia temporal del "head" simplificado
+;; en los 3 tramos del canal.
+;;
+;; Cada paso devuelve:
+;;   [head-tramo-1 head-tramo-2 head-tramo-3]
+;;
+;; Se usa para calcular métricas tipo paper:
+;; MAE, IAE y dead-band violation rate.
 ;; --------------------------------------------------
+
 to-report simulate-head-history [gate-openings]
 
   ;; separar TO y CH
@@ -474,146 +435,26 @@ to-report compute-deliveries [gate-openings]
 end
 
 
-;; MAE (Mean Absolute Error - Error Absoluto Medio)
-;; Que tan lejos estamos del valor real
 
-to-report calc-head-MAE [head-history]
-  let max-error 0
-  let t 0
 
-  while [t < length head-history] [
-    let step item t head-history
-    let s 0
+;; =========================================================
+;; Indicadores de rendimiento
+;; =========================================================
 
-    while [s < num-check-gates] [
-      let h item s step
-      let h-target item s target-heads
 
-      if h-target > 0 [
-        let rel-error abs (h - h-target) / h-target
-        if rel-error > max-error [
-          set max-error rel-error
-        ]
-      ]
 
-      set s (s + 1)
-    ]
 
-    set t (t + 1)
-  ]
 
-  report max-error
+
+;; Coeficiente de variación
+to-report coeff-variation [xs]
+  if empty? xs [ report 0 ]
+  let m mean xs
+  if m = 0 [ report 0 ]
+
+  let var mean map [x -> (x - m) ^ 2] xs
+  report (sqrt var) / m
 end
-
-
-
-;; IAE (Integral of Absolute Error - Integral del Error Absoluto)
-;; Métrica acumulativa que mide el área total del error a lo largo del tiempo. 
-;; No solo cuánto te equivocas, sino cuánto tiempo permaneces equivocado.
-to-report calc-head-IAE [head-history]
-  let total-error 0
-  let sample-count 0
-  let t 0
-
-  while [t < length head-history] [
-    let step item t head-history
-    let s 0
-
-    while [s < num-check-gates] [
-      let h item s step
-      let h-target item s target-heads
-
-      if h-target > 0 [
-        let rel-error abs (h - h-target) / h-target
-        set total-error (total-error + rel-error)
-        set sample-count (sample-count + 1)
-      ]
-
-      set s (s + 1)
-    ]
-
-    set t (t + 1)
-  ]
-
-  if sample-count = 0 [ report 0 ]
-  report total-error / sample-count
-end
-
-
-
-
-
-;; Dead-band (Banda Muerta)
-;; umbral de tolerancia, rango alrededor del valor objetivo donde se decide no hacer nada
-to-report calc-deadband-violation-rate [head-history]
-  let violations 0
-  let sample-count 0
-  let t 0
-
-  while [t < length head-history] [
-    let step item t head-history
-    let s 0
-
-    while [s < num-check-gates] [
-      let h item s step
-      let h-target item s target-heads
-
-      if h-target > 0 [
-        let rel-error abs (h - h-target) / h-target
-        if rel-error > dead-band-ratio [
-          set violations (violations + 1)
-        ]
-        set sample-count (sample-count + 1)
-      ]
-
-      set s (s + 1)
-    ]
-
-    set t (t + 1)
-  ]
-
-  if sample-count = 0 [ report 0 ]
-  report violations / sample-count
-end
-
-
-
-
-;;
-;; MOSTRAR RESULTADOS
-;;
-to print-best-results
-  let best-pos global-best-pos
-  let delivery-history simulate-delivery-history best-pos
-  let avg-deliveries compute-deliveries best-pos
-  let head-history simulate-head-history best-pos
-
-  let adequacy calc-PA-history delivery-history demands
-  let efficiency calc-PF-history delivery-history demands
-  let equity calc-PE-history delivery-history demands
-  let dependability calc-PD-history delivery-history demands
-
-  let mae calc-head-MAE head-history
-  let iae calc-head-IAE head-history
-  let deadband-violation-rate calc-deadband-violation-rate head-history
-
-  print "----------------------------------------"
-  print "BEST SOLUTION SUMMARY"
-  print (word "Best openings (TO1..TO6, CH1..CH3): " best-pos)
-  print (word "Average deliveries: " avg-deliveries)
-  print (word "Best fitness: " precision global-best-val 6)
-  print (word "PA: " precision adequacy 6)
-  print (word "PF: " precision efficiency 6)
-  print (word "PE: " precision equity 6)
-  print (word "PD: " precision dependability 6)
-  print (word "MAE: " precision mae 6)
-  print (word "IAE: " precision iae 6)
-  print (word "Dead-band violation rate: " precision deadband-violation-rate 6)
-  print "----------------------------------------"
-end
-
-
-
 
 
 to-report calc-PA-history [history qr-list]
@@ -727,64 +568,138 @@ end
 
 
 
+;; MAE = Maximum Absolute Error (relativo respecto al head objetivo)
+;; Que tan lejos estamos del valor real
+
+to-report calc-head-MAE [head-history]
+  let max-error 0
+  let t 0
+
+  while [t < length head-history] [
+    let step item t head-history
+    let s 0
+
+    while [s < num-check-gates] [
+      let h item s step
+      let h-target item s target-heads
+
+      if h-target > 0 [
+        let rel-error abs (h - h-target) / h-target
+        if rel-error > max-error [
+          set max-error rel-error
+        ]
+      ]
+
+      set s (s + 1)
+    ]
+
+    set t (t + 1)
+  ]
+
+  report max-error
+end
 
 
 
+;; IAE = promedio temporal del error absoluto relativo del head
+;; Métrica acumulativa que mide el área total del error a lo largo del tiempo. 
+;; No solo cuánto te equivocas, sino cuánto tiempo permaneces equivocado.
+to-report calc-head-IAE [head-history]
+  let total-error 0
+  let sample-count 0
+  let t 0
 
+  while [t < length head-history] [
+    let step item t head-history
+    let s 0
 
+    while [s < num-check-gates] [
+      let h item s step
+      let h-target item s target-heads
 
+      if h-target > 0 [
+        let rel-error abs (h - h-target) / h-target
+        set total-error (total-error + rel-error)
+        set sample-count (sample-count + 1)
+      ]
 
+      set s (s + 1)
+    ]
 
+    set t (t + 1)
+  ]
 
-
-
-;; -----------------------------------------
-;; SETUP DATOS inicializa datos del problema
-;; -----------------------------------------
-to setup-problem-data
-  set demands build-demands
-  set total-demand sum demands
-
-  ifelse total-demand > 0
-    [ set shortage-ratio available-flow / total-demand ]
-    [ set shortage-ratio 0 ]
-
-  set num-check-gates 3
-
-  ;; factores por tramo
-  set section-factors (list
-    1
-    (max (list 0 (1 - section-decay)))
-    (max (list 0 (1 - (2 * section-decay))))
-  )
-
-  ;; tradeoff del check gate: prioridad local vs paso aguas abajo
-  set check-tradeoff 0.3
-
-  ;; sensibilidad del "head" local al check gate
-  set check-head-sensitivity 0.35
-
-  ;; distinta sensibilidad por turnout
-  set turnout-gains (list 1.04 0.98 1.03 0.97 1.02 0.96)
-
-  ;; nuevos parámetros temporales
-  set sim-steps 12
-  set head-memory 0.65
-  set local-utilization-weight 0.25
-  
-  
-  ;; métricas hidráulicas tipo paper
-  set target-heads (list 1 1 1)
-  set dead-band-ratio 0.2
-
-
-  set best-history []
+  if sample-count = 0 [ report 0 ]
+  report total-error / sample-count
 end
 
 
 
 
-;; Iicializa los líderes 
+
+;; Dead-band (Banda Muerta)
+;; umbral de tolerancia, rango alrededor del valor objetivo donde se decide no hacer nada
+to-report calc-deadband-violation-rate [head-history]
+  let violations 0
+  let sample-count 0
+  let t 0
+
+  while [t < length head-history] [
+    let step item t head-history
+    let s 0
+
+    while [s < num-check-gates] [
+      let h item s step
+      let h-target item s target-heads
+
+      if h-target > 0 [
+        let rel-error abs (h - h-target) / h-target
+        if rel-error > dead-band-ratio [
+          set violations (violations + 1)
+        ]
+        set sample-count (sample-count + 1)
+      ]
+
+      set s (s + 1)
+    ]
+
+    set t (t + 1)
+  ]
+
+  if sample-count = 0 [ report 0 ]
+  report violations / sample-count
+end
+
+
+
+
+
+
+;; --------------------------------------------------
+;; Fitness del problema de reparto de agua.
+;;
+;; Se minimiza la función:
+;;   FF = (1 - PA) + (1 - PF) + PE + PD
+;;
+;; Los cuatro indicadores se calculan a partir de la
+;; historia
+
+to-report water-fitness [gate-openings qr-list]
+  let history simulate-delivery-history gate-openings
+
+  let adequacy calc-PA-history history qr-list
+  let efficiency calc-PF-history history qr-list
+  let equity calc-PE-history history qr-list
+  let dependability calc-PD-history history qr-list
+
+  report (1 - adequacy) + (1 - efficiency) + equity + dependability
+end
+
+
+
+
+
+;; Inicializa la jerarquía alpha-beta-d
 
 to initialize-leaders
   update-alpha-beta-delta
@@ -803,6 +718,7 @@ to update-global-best
     set global-best-val alpha-val
   ]
 end
+
 
 ;; Actualiza alpha/beta/delta con un candidato dado
 ;; Recibe 
@@ -839,44 +755,6 @@ to update-leaders-with [candidate-fitness candidate-pos]
 end
   
 
-to setup
-  clear-all
-
-  set max-ticks ceiling (evaluation-budget / population-size)
-  set max-ticks max list 50 min list max-ticks 2000
-
-  ;; Preparar datos del problema
-  setup-problem-data
-
-  ;; Inicializar población y líderes
-  initialize-particles
-  initialize-leaders
-  initialize-global-best
-
-  reset-ticks
-end
-
-
-
-
-
-;; Inicializar particulas en el espacio de busqueda
-to initialize-particles
-  create-particles population-size [
-
-    ;; aperturas iniciales:
-    ;; [TO1..TO6  CH1..CH3]
-    set decision-vector n-values (num-turnouts + num-check-gates) [
-      random-float 1.0
-    ]
-
-    set fitness water-fitness decision-vector demands
-    hide-turtle
-  ]
-end
-
-
-
 ;; Actualiza quienes son los primeros 3 lobos (alpha, beta y delta)
 
 to update-alpha-beta-delta
@@ -905,6 +783,58 @@ to update-alpha-beta-delta
 end
 
 
+
+
+
+;; Inicializar particulas en el espacio de busqueda
+
+to initialize-particles
+  create-particles population-size [
+
+    ;; aperturas iniciales:
+    ;; [TO1..TO6  CH1..CH3]
+    set decision-vector n-values (num-turnouts + num-check-gates) [
+      random-float 1.0
+    ]
+
+    set fitness water-fitness decision-vector demands
+    hide-turtle
+  ]
+end
+
+
+;; SETUP
+
+to setup
+  clear-all
+
+  set max-ticks ceiling (evaluation-budget / population-size)
+  set max-ticks max list 50 min list max-ticks 2000
+
+  ;; Preparar datos del problema
+  setup-problem-data
+
+  ;; Inicializar población y líderes
+  initialize-particles
+  initialize-leaders
+  initialize-global-best
+  update-dashboard-data
+
+  reset-ticks
+end
+
+
+
+
+;; --------------------------------------------------
+;; Actualización de posición según GWO.
+;;
+;; Cada lobo actualiza su vector de aperturas a partir de:
+;; - alpha
+;; - beta
+;; - delta
+;;
+;; Las aperturas finales se recortan al rango [0
 
 to-report gwo-next-position [current-pos a]
   let new-pos []
@@ -960,20 +890,6 @@ to-report gwo-next-position [current-pos a]
 end
 
 
-to update-particle-visual-position
-  ;; Posición visual basada en:
-  ;; x = cantidad total repartida
-  ;; y = fitness (escalado de forma simple)
-
-  let allocated sum decision-vector
-  let fit fitness
-
-  let xvis min list max-pxcor max list min-pxcor (allocated * 10 - 5)
-  let yvis min list max-pycor max list min-pycor (5 - fit * 5)
-
-  setxy xvis yvis
-end
-
 
 
 ;; FUNCION PRINCIPAL DE OPTIMIZACION SEGUN EL ALGORITMO
@@ -994,40 +910,122 @@ to go
   ;; actualizar líderes
   update-alpha-beta-delta
   update-global-best
+  update-dashboard-data
 
   ;; guardar histórico del mejor fitness global
   set best-history lput global-best-val best-history
 
   tick
-end]]></code>
+end
+
+;; --------------------------------------------------
+;; Actualiza los datos de interfaz que son costosos
+;; de recalcular en monitores/plots.
+;; --------------------------------------------------
+to update-dashboard-data
+  let best-pos global-best-pos
+  let delivery-history simulate-delivery-history best-pos
+
+  set ui-average-deliveries compute-deliveries best-pos
+  set ui-adequacy calc-PA-history delivery-history demands
+  set ui-equity calc-PE-history delivery-history demands
+  set ui-dependability calc-PD-history delivery-history demands
+end
+
+;; --------------------------------------------------
+;; Imprime en consola un resumen completo de la mejor
+;; solución global encontrada:
+;; - aperturas
+;; - entregas medias
+;; - fitness
+;; - indicadores PA, PF,
+
+to print-best-results
+  let best-pos global-best-pos
+  let delivery-history simulate-delivery-history best-pos
+  let avg-deliveries compute-deliveries best-pos
+  let head-history simulate-head-history best-pos
+
+  let adequacy calc-PA-history delivery-history demands
+  let efficiency calc-PF-history delivery-history demands
+  let equity calc-PE-history delivery-history demands
+  let dependability calc-PD-history delivery-history demands
+
+  let mae calc-head-MAE head-history
+  let iae calc-head-IAE head-history
+  let deadband-violation-rate calc-deadband-violation-rate head-history
+
+  print "----------------------------------------"
+  print "BEST SOLUTION SUMMARY"
+  print (word "Best openings (TO1..TO6, CH1..CH3): " best-pos)
+  print (word "Average deliveries: " avg-deliveries)
+  print (word "Best fitness: " precision global-best-val 6)
+  print (word "PA: " precision adequacy 6)
+  print (word "PF: " precision efficiency 6)
+  print (word "PE: " precision equity 6)
+  print (word "PD: " precision dependability 6)
+  print (word "MAE: " precision mae 6)
+  print (word "IAE: " precision iae 6)
+  print (word "Dead-band violation rate: " precision deadband-violation-rate 6)
+  print "----------------------------------------"
+end
+
+
+
+]]></code>
   <widgets>
     <view3d wrappingAllowedZ="true" x="0" wrappingAllowedX="true" y="0" minPycor="-20" height="255" showTickCounter="true" patchSize="6.0" fontSize="10" wrappingAllowedY="true" width="254" tickCounterLabel="ticks" maxPycor="20" updateMode="1" frameRate="30.0" maxPzcor="20" maxPxcor="20" minPxcor="-20" minPzcor="0"></view3d>
-    <slider x="381" step="1" y="4" max="100" width="174" display="population-size" height="50" min="1" direction="Horizontal" default="70.0" variable="population-size"></slider>
-    <plot x="245" autoPlotX="true" yMax="10.0" autoPlotY="true" yAxis="fitness" y="273" xMin="0.0" height="216" legend="true" xMax="10.0" yMin="0.0" width="317" xAxis="iteration" display="plot 1">
-      <setup></setup>
-      <update></update>
-      <pen interval="1.0" mode="0" display="mean" color="-10899396" legend="true">
-        <setup>clear-plot</setup>
-        <update>plotxy ticks global-best-val</update>
-      </pen>
-    </plot>
-    <monitor x="509" precision="17" y="207" height="60" fontSize="11" width="100" display="Iteration">ticks</monitor>
-    <monitor x="392" precision="17" y="207" height="60" fontSize="11" width="100" display="Best fitness">global-best-val</monitor>
-    <monitor x="393" precision="17" y="134" height="64" fontSize="11" width="320" display="Best solution">global-best-pos</monitor>
-    <slider x="383" step="5000" y="73" max="100000" width="172" display="evaluation-budget" height="50" min="10000" direction="Horizontal" default="50000.0" variable="evaluation-budget"></slider>
-    <button x="241" y="76" height="46" disableUntilTicks="false" forever="false" kind="Observer" width="106" display="STEP by STEP">go</button>
-    <button x="240" y="130" height="44" disableUntilTicks="false" forever="true" kind="Observer" width="124" display="EJECUTAR GWO">go</button>
-    <button x="241" y="21" height="47" disableUntilTicks="false" forever="false" kind="Observer" width="102" display="SETUP GWO">setup</button>
     <slider x="5" step="1" y="4" max="20" width="198" display="num-turnouts" height="54" min="3" direction="Horizontal" default="6.0" variable="num-turnouts"></slider>
     <slider x="3" step="0.005" y="270" max="0.08" width="201" display="section-decay" height="50" min="0" direction="Horizontal" default="0.03" variable="section-decay"></slider>
     <slider x="4" step="0.01" y="74" max="1" width="199" display="base-demand" height="50" min="0.01" direction="Horizontal" default="0.2" variable="base-demand"></slider>
-    <slider x="4" step="0.1" y="141" max="5" width="200" display="available-flow" height="50" min="0.1" direction="Horizontal" default="0.8" variable="available-flow"></slider>
+    <slider x="4" step="0.1" y="141" max="5" width="200" display="available-flow" height="50" min="0.1" direction="Horizontal" default="0.3" variable="available-flow"></slider>
     <chooser x="5" y="204" height="60" variable="demand-pattern" current="0" width="196" display="demand-pattern">
       <choice type="string" value="uniform"></choice>
       <choice type="string" value="random"></choice>
       <choice type="string" value="upstream-heavy"></choice>
       <choice type="string" value="downstream-heavy"></choice>
     </chooser>
+    <slider x="3" step="1" y="393" max="100" width="174" display="population-size" height="50" min="1" direction="Horizontal" default="70.0" variable="population-size"></slider>
+    <slider x="5" step="5000" y="462" max="100000" width="172" display="evaluation-budget" height="50" min="10000" direction="Horizontal" default="50000.0" variable="evaluation-budget"></slider>
+    <button x="228" y="127" height="44" disableUntilTicks="false" forever="true" kind="Observer" width="124" display="EJECUTAR GWO">go</button>
+    <button x="237" y="73" height="46" disableUntilTicks="false" forever="false" kind="Observer" width="106" display="STEP by STEP">go</button>
+    <monitor x="730" precision="5" y="237" height="60" fontSize="11" width="100" display="PD">ui-dependability</monitor>
+    <monitor x="730" precision="5" y="162" height="60" fontSize="11" width="100" display="PE">ui-equity</monitor>
+    <monitor x="730" precision="5" y="87" height="60" fontSize="11" width="100" display="PA">ui-adequacy</monitor>
+    <plot x="227" autoPlotX="true" yMax="1.0" autoPlotY="true" yAxis="fitness" y="313" xMin="0.0" height="216" legend="true" xMax="1.0" yMin="0.0" width="317" xAxis="iteration" display="FITNESS">
+      <setup></setup>
+      <update></update>
+      <pen interval="1.0" mode="0" display="global-best" color="-10899396" legend="true">
+        <setup>clear-plot</setup>
+        <update>plotxy ticks global-best-val</update>
+      </pen>
+      <pen interval="1.0" mode="0" display="current-best" color="-2674135" legend="true">
+        <setup>clear-plot</setup>
+        <update>plotxy ticks alpha-val</update>
+      </pen>
+    </plot>
+    <plot x="566" autoPlotX="true" yMax="1.0" autoPlotY="true" yAxis="indicator value" y="314" xMin="0.0" height="212" legend="true" xMax="1.0" yMin="0.0" width="318" xAxis="iteration" display="INDICADORES">
+      <setup></setup>
+      <update></update>
+      <pen interval="1.0" mode="0" display="PA" color="-14439633" legend="true">
+        <setup>clear-plot</setup>
+        <update>plotxy ticks ui-adequacy</update>
+      </pen>
+      <pen interval="1.0" mode="0" display="PE" color="-7500403" legend="true">
+        <setup>clear-plot</setup>
+        <update>plotxy ticks ui-equity</update>
+      </pen>
+      <pen interval="1.0" mode="0" display="PD" color="-2674135" legend="true">
+        <setup>clear-plot</setup>
+        <update>plotxy ticks ui-dependability</update>
+      </pen>
+    </plot>
+    <button x="239" y="18" height="47" disableUntilTicks="false" forever="false" kind="Observer" width="102" display="SETUP GWO">setup</button>
+    <monitor x="385" precision="17" y="13" height="60" fontSize="11" width="100" display="Iteration">ticks</monitor>
+    <monitor x="384" precision="2" y="88" height="60" fontSize="11" width="244" display="Best TO openings"><![CDATA[map [x -> precision x 3] (sublist global-best-pos 0 num-turnouts)]]></monitor>
+    <monitor x="384" precision="2" y="164" height="60" fontSize="11" width="157" display="Best CH openings"><![CDATA[map [x -> precision x 3] (sublist global-best-pos num-turnouts (num-turnouts + num-check-gates))]]></monitor>
+    <monitor x="730" precision="2" y="14" height="60" fontSize="11" width="100" display="Average deliveries"><![CDATA[map [x -> precision x 3] ui-average-deliveries]]></monitor>
+    <monitor x="515" precision="5" y="12" height="60" fontSize="11" width="100" display="Best fitness">global-best-val</monitor>
   </widgets>
   <info>## ¿QUÉ ES?
 
