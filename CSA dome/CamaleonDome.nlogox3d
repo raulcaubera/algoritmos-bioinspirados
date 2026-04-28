@@ -1,0 +1,2273 @@
+<?xml version="1.0" encoding="utf-8"?>
+<model version="NetLogo 3D 7.0.3" snapToGrid="false">
+  <code><![CDATA[; ==========================================================
+;  CSA — Algoritmo de Enjambre de Camaleones
+;  Versión refactorizada para diseño estructural vectorial
+;  (preparada para el domo de 120 barras, 7 variables)
+; ==========================================================
+
+breed [ particles particle ]
+
+globals [
+  g-best-vars         ;; mejor solución global (lista)
+  g-best-val          ;; mejor fitness global
+
+  number-of-groups    ;; número de variables de diseño
+  lower-bounds        ;; lista de límites inferiores
+  upper-bounds        ;; lista de límites superiores
+  
+  ;; parámetros base del benchmark
+  base-young-modulus
+  base-density
+  base-frequency-1
+  base-frequency-2
+
+  ;; parámetros efectivos (modificados por sliders)
+  effective-young-modulus
+  effective-density
+  min-frequency-1
+  min-frequency-2
+
+  ;; masas nodales no estructurales efectivas
+  apex-extra-mass
+  upper-ring-extra-mass
+  mid-ring-extra-mass
+  
+  
+  ;; --- modelo del domo de 120 barras ---
+  node-coords
+  member-connectivity
+  member-lengths
+
+  support-node-ids
+  total-dofs
+  restrained-dofs
+  free-dofs
+
+  member-group-counts
+
+  apex-node-id
+  upper-ring-node-ids
+  mid-ring-node-ids
+  outer-ring-node-ids
+
+]
+
+particles-own [
+  vars                ;; solución actual de la partícula: lista de variables
+  vel                 ;; velocidad vectorial
+  p-best-vars         ;; mejor solución personal
+  p-best-val          ;; mejor fitness personal
+  current-val         ;; fitness actual
+]
+
+
+; ----------------------------------------------------------
+; REPORTERS
+; ----------------------------------------------------------
+to-report g-best-vars-text
+  if empty? g-best-vars [
+    report "Sin inicializar"
+  ]
+
+  report (word
+    "A1=" precision (item 0 g-best-vars) 4 "\n"
+    "A2=" precision (item 1 g-best-vars) 4 "\n"
+    "A3=" precision (item 2 g-best-vars) 4 "\n"
+    "A4=" precision (item 3 g-best-vars) 4 "\n"
+    "A5=" precision (item 4 g-best-vars) 4 "\n"
+    "A6=" precision (item 5 g-best-vars) 4 "\n"
+    "A7=" precision (item 6 g-best-vars) 4
+  )
+end
+
+to-report g-best-val-text
+  report precision g-best-val 6
+end
+
+to-report model-node-count
+  report length node-coords
+end
+
+to-report model-member-count
+  report length member-connectivity
+end
+
+to-report model-group-counts
+  report member-group-counts
+end
+
+to-report model-support-count
+  report length support-node-ids
+end
+
+to-report model-total-dofs
+  report total-dofs
+end
+
+to-report model-free-dofs-count
+  report length free-dofs
+end
+
+to-report unique-member-lengths
+  let rounded []
+  let i 0
+
+  while [i < length member-lengths] [
+    set rounded lput (precision (item i member-lengths) 4) rounded
+    set i i + 1
+  ]
+
+  report remove-duplicates sort rounded
+end
+
+
+; ----------------------------------------------------------
+; SETUP
+; ----------------------------------------------------------
+to setup
+  clear-all
+  reset-ticks
+
+  setup-design-space
+  build-120bar-model
+
+  initialize-particles
+  initialize-global-best
+end
+
+
+; ----------------------------------------------------------
+; ESPACIO DE DISEÑO DEL PROBLEMA
+; ----------------------------------------------------------
+to setup-design-space
+  ;; 7 grupos del domo de 120 barras
+  set number-of-groups 7
+
+  ;; áreas continuas entre 1 y 129.3 cm^2
+  set lower-bounds n-values number-of-groups [ -> 1.0 ]
+  set upper-bounds n-values number-of-groups [ -> 129.3 ]
+
+  ;; datos base del benchmark
+  set base-young-modulus 210e9
+  set base-density 7971.810
+  set base-frequency-1 9
+  set base-frequency-2 11
+
+  ;; aplicar sliders de sensibilidad
+  set effective-young-modulus (base-young-modulus * young-modulus-factor)
+  set effective-density (base-density * density-factor)
+
+  set min-frequency-1 (base-frequency-1 * frequency-target-factor)
+  set min-frequency-2 (base-frequency-2 * frequency-target-factor)
+
+  ;; masas no estructurales efectivas
+  ;; benchmark base: 3000 kg, 500 kg, 100 kg
+  set apex-extra-mass       (3000 * nonstructural-mass-factor)
+  set upper-ring-extra-mass (500  * nonstructural-mass-factor)
+  set mid-ring-extra-mass   (100  * nonstructural-mass-factor)
+end
+
+
+; ----------------------------------------------------------
+; INICIALIZACIÓN DE PARTÍCULAS
+; ----------------------------------------------------------
+to initialize-particles
+  create-particles population-size [
+    set vars random-design
+    set vel random-normal-vector number-of-groups 0.5
+
+    set current-val evaluate-design vars
+    set p-best-vars vars
+    set p-best-val current-val
+
+    ;; visualmente ya no importa el espacio 2D real
+    ;; las tortugas solo actúan como contenedores/agentes
+    hide-turtle
+  ]
+end
+
+
+
+
+
+; ==========================================================
+; MODELO DEL DOMO DE 120 BARRAS
+; Basado en el benchmark de 49 nodos / 120 barras / 7 grupos
+; ==========================================================
+
+to build-120bar-model
+  ;; 49 nodos espaciales, 3 DOFs por nodo
+  set total-dofs (49 * 3)
+
+  ;; grupos del benchmark: 12, 12, 12, 24, 24, 12, 24 = 120
+  set member-group-counts [12 12 12 24 24 12 24]
+
+  ;; apoyos: anillo exterior
+  set outer-ring-node-ids n-values 12 [i -> i + 1]
+  set support-node-ids outer-ring-node-ids
+
+  ;; nodos útiles para masas nodales posteriores
+  set mid-ring-node-ids   n-values 24 [i -> i + 13]   ;; 13..36
+  set upper-ring-node-ids n-values 12 [i -> i + 37]   ;; 37..48
+  set apex-node-id 49
+
+  build-120bar-node-coords
+  build-120bar-connectivity
+  build-120bar-member-lengths
+
+  set restrained-dofs build-restrained-dofs
+  set free-dofs build-free-dofs
+end
+
+;; coordenadas nodales
+to build-120bar-node-coords
+  set node-coords []
+
+  ;; ----------------------------------------
+  ;; Nodos 1..12  : anillo exterior
+  ;; radio = 15.89 m, z = 0 m
+  ;; 12 nodos -> incremento angular de 30 grados
+  ;; ----------------------------------------
+  let i 0
+  while [i < 12] [
+    let theta-deg (i * 30)
+    let x (15.89 * cos theta-deg)
+    let y (15.89 * sin theta-deg)
+    let z 0
+    set node-coords lput (list x y z) node-coords
+    set i i + 1
+  ]
+
+  ;; ----------------------------------------
+  ;; Nodos 13..36 : anillo intermedio
+  ;; radio = 12.04 m, z = 3 m
+  ;; 24 nodos -> incremento angular de 15 grados
+  ;; ----------------------------------------
+  set i 0
+  while [i < 24] [
+    let theta-deg (i * 15)
+    let x (12.04 * cos theta-deg)
+    let y (12.04 * sin theta-deg)
+    let z 3
+    set node-coords lput (list x y z) node-coords
+    set i i + 1
+  ]
+
+  ;; ----------------------------------------
+  ;; Nodos 37..48 : anillo superior
+  ;; radio = 6.94 m, z = 5.85 m
+  ;; 12 nodos -> incremento angular de 30 grados
+  ;; ----------------------------------------
+  set i 0
+  while [i < 12] [
+    let theta-deg (i * 30)
+    let x (6.94 * cos theta-deg)
+    let y (6.94 * sin theta-deg)
+    let z 5.85
+    set node-coords lput (list x y z) node-coords
+    set i i + 1
+  ]
+
+  ;; ----------------------------------------
+  ;; Nodo 49 : ápice
+  ;; ----------------------------------------
+  set node-coords lput (list 0 0 7.0) node-coords
+end
+
+
+
+;;Conectividad de las 120 barras
+to build-120bar-connectivity
+  set member-connectivity []
+
+  ;; ======================================================
+  ;; GRUPO 1 (12 barras)
+  ;; Ápice (49) conectado al anillo superior (37..48)
+  ;; ======================================================
+  let i 1
+  while [i <= 12] [
+    set member-connectivity lput (list 49 (49 - i)) member-connectivity
+    set i i + 1
+  ]
+
+  ;; ======================================================
+  ;; GRUPO 2 (12 barras)
+  ;; Anillo superior circunferencial: 37-38-...-48-37
+  ;; ======================================================
+  set i 1
+  while [i <= 11] [
+    set member-connectivity lput (list (36 + i) (36 + i + 1)) member-connectivity
+    set i i + 1
+  ]
+  set member-connectivity lput (list 48 37) member-connectivity
+
+  ;; ======================================================
+  ;; GRUPO 3 (12 barras)
+  ;; Conexión anillo superior → anillo intermedio
+  ;; patrón radial
+  ;; ======================================================
+  set i 1
+  while [i <= 12] [
+    set member-connectivity lput (list (36 + i) (2 * i + 11)) member-connectivity
+    set i i + 1
+  ]
+
+  ;; ======================================================
+  ;; GRUPO 4 (24 barras)
+  ;; Diagonales entre anillo superior e intermedio
+  ;; ======================================================
+  set i 1
+  while [i <= 11] [
+    set member-connectivity lput (list (37 + i) (2 * i + 12)) member-connectivity
+    set member-connectivity lput (list (37 + i) (2 * i + 14)) member-connectivity
+    set i i + 1
+  ]
+  set member-connectivity lput (list 37 36) member-connectivity
+  set member-connectivity lput (list 37 14) member-connectivity
+
+  ;; ======================================================
+  ;; GRUPO 5 (24 barras)
+  ;; Anillo intermedio circunferencial: 13-14-...-36-13
+  ;; ======================================================
+  set i 1
+  while [i <= 23] [
+    set member-connectivity lput (list (12 + i) (12 + i + 1)) member-connectivity
+    set i i + 1
+  ]
+  set member-connectivity lput (list 36 13) member-connectivity
+
+  ;; ======================================================
+  ;; GRUPO 6 (12 barras)
+  ;; Conexión anillo intermedio → anillo exterior
+  ;; patrón radial
+  ;; ======================================================
+  set i 1
+  while [i <= 12] [
+    set member-connectivity lput (list (11 + 2 * i) i) member-connectivity
+    set i i + 1
+  ]
+
+  ;; ======================================================
+  ;; GRUPO 7 (24 barras)
+  ;; Diagonales entre anillo exterior e intermedio
+  ;; ======================================================
+  set i 2
+  while [i <= 12] [
+    set member-connectivity lput (list i (2 * i + 10)) member-connectivity
+    set member-connectivity lput (list i (2 * i + 12)) member-connectivity
+    set i i + 1
+  ]
+  set member-connectivity lput (list 1 14) member-connectivity
+  set member-connectivity lput (list 1 36) member-connectivity
+end
+
+;;Longitudes de las barras
+to build-120bar-member-lengths
+  set member-lengths []
+
+  let i 0
+  while [i < length member-connectivity] [
+    let conn item i member-connectivity
+    let ni first conn
+    let nj last conn
+
+    set member-lengths lput (distance-between-nodes ni nj) member-lengths
+    set i i + 1
+  ]
+end
+
+
+
+
+
+to-report node-xyz [node-id]
+  report item (node-id - 1) node-coords
+end
+
+
+to-report distance-between-nodes [ni nj]
+  let p node-xyz ni
+  let q node-xyz nj
+
+  let delta-x ((item 0 q) - (item 0 p))
+  let delta-y ((item 1 q) - (item 1 p))
+  let delta-z ((item 2 q) - (item 2 p))
+
+  report sqrt (delta-x * delta-x + delta-y * delta-y + delta-z * delta-z)
+end
+
+
+to-report node-dof-indices [node-id]
+  let base (3 * (node-id - 1))
+  report (list base (base + 1) (base + 2))
+end
+
+to-report build-restrained-dofs
+  let result []
+  let i 0
+
+  while [i < length support-node-ids] [
+    let node-id item i support-node-ids
+    let dofs node-dof-indices node-id
+    set result sentence result dofs
+    set i i + 1
+  ]
+
+  report result
+end
+
+
+to-report build-free-dofs
+  let result []
+  let d 0
+
+  while [d < total-dofs] [
+    if not member? d restrained-dofs [
+      set result lput d result
+    ]
+    set d d + 1
+  ]
+
+  report result
+end
+
+to-report element-dof-indices [node-i node-j]
+  report sentence (node-dof-indices node-i) (node-dof-indices node-j)
+end
+
+
+
+;;Expansión del diseño de 7 variables a 120 barras reales
+to-report expand-design-to-members [design]
+  ;; design = [A1 ... A7] en cm^2
+  ;; salida = lista de 120 áreas en m^2
+
+  let member-areas []
+  let group-index 0
+
+  while [group-index < length design] [
+    let area-cm2 item group-index design
+    let area-m2 (area-cm2 * 1.0e-4)
+
+    let group-size item group-index member-group-counts
+    let local-index 0
+
+    while [local-index < group-size] [
+      set member-areas lput area-m2 member-areas
+      set local-index local-index + 1
+    ]
+
+    set group-index group-index + 1
+  ]
+
+  report member-areas
+end
+
+
+
+
+
+
+
+
+
+  
+;;Ceros: vector y matriz
+to-report zero-vector [n]
+  report n-values n [ i -> 0 ]
+end
+
+to-report zero-matrix [rows cols]
+  report n-values rows [ r -> n-values cols [ c -> 0 ] ]
+end
+
+;;Reemplazar un valor en una matriz
+to-report matrix-set [mat row-index col-index new-value]
+  let selected-row item row-index mat
+  let updated-row replace-item col-index selected-row new-value
+  report replace-item row-index mat updated-row
+end
+
+
+;;Sumar a una posición concreta de la matriz
+to-report matrix-add [mat row-index col-index increment]
+  let current-value item col-index (item row-index mat)
+  report matrix-set mat row-index col-index (current-value + increment)
+end
+
+
+;;Extraer un subvector por índices
+to-report subvector-by-indices [full-vector index-list]
+  let result []
+  let idx-pos 0
+
+  while [idx-pos < length index-list] [
+    let dof-index item idx-pos index-list
+    set result lput (item dof-index full-vector) result
+    set idx-pos idx-pos + 1
+  ]
+
+  report result
+end
+
+;;Extraer una submatriz por índices
+to-report submatrix-by-indices [full-matrix index-list]
+  let result []
+  let row-pos 0
+
+  while [row-pos < length index-list] [
+    let row-index item row-pos index-list
+    let full-row item row-index full-matrix
+
+    let reduced-row []
+    let col-pos 0
+
+    while [col-pos < length index-list] [
+      let col-index item col-pos index-list
+      set reduced-row lput (item col-index full-row) reduced-row
+      set col-pos col-pos + 1
+    ]
+
+    set result lput reduced-row result
+    set row-pos row-pos + 1
+  ]
+
+  report result
+end
+
+to-report vector-add-at [vec index increment]
+  let current-value item index vec
+  report replace-item index vec (current-value + increment)
+end
+
+;; rigidez elemental 
+to-report element-stiffness-3d [area node-i node-j]
+  let coord-i node-xyz node-i
+  let coord-j node-xyz node-j
+
+  let x1 item 0 coord-i
+  let y1 item 1 coord-i
+  let z1 item 2 coord-i
+
+  let x2 item 0 coord-j
+  let y2 item 1 coord-j
+  let z2 item 2 coord-j
+
+  let delta-x (x2 - x1)
+  let delta-y (y2 - y1)
+  let delta-z (z2 - z1)
+
+  let elem-length sqrt (delta-x * delta-x + delta-y * delta-y + delta-z * delta-z)
+
+  let dir-cx (delta-x / elem-length)
+  let dir-cy (delta-y / elem-length)
+  let dir-cz (delta-z / elem-length)
+
+  let coeff (effective-young-modulus * area / elem-length)
+
+  report (list
+    (list (coeff * dir-cx * dir-cx) (coeff * dir-cx * dir-cy) (coeff * dir-cx * dir-cz)
+          (- coeff * dir-cx * dir-cx) (- coeff * dir-cx * dir-cy) (- coeff * dir-cx * dir-cz))
+
+    (list (coeff * dir-cx * dir-cy) (coeff * dir-cy * dir-cy) (coeff * dir-cy * dir-cz)
+          (- coeff * dir-cx * dir-cy) (- coeff * dir-cy * dir-cy) (- coeff * dir-cy * dir-cz))
+
+    (list (coeff * dir-cx * dir-cz) (coeff * dir-cy * dir-cz) (coeff * dir-cz * dir-cz)
+          (- coeff * dir-cx * dir-cz) (- coeff * dir-cy * dir-cz) (- coeff * dir-cz * dir-cz))
+
+    (list (- coeff * dir-cx * dir-cx) (- coeff * dir-cx * dir-cy) (- coeff * dir-cx * dir-cz)
+          (coeff * dir-cx * dir-cx) (coeff * dir-cx * dir-cy) (coeff * dir-cx * dir-cz))
+
+    (list (- coeff * dir-cx * dir-cy) (- coeff * dir-cy * dir-cy) (- coeff * dir-cy * dir-cz)
+          (coeff * dir-cx * dir-cy) (coeff * dir-cy * dir-cy) (coeff * dir-cy * dir-cz))
+
+    (list (- coeff * dir-cx * dir-cz) (- coeff * dir-cy * dir-cz) (- coeff * dir-cz * dir-cz)
+          (coeff * dir-cx * dir-cz) (coeff * dir-cy * dir-cz) (coeff * dir-cz * dir-cz))
+  )
+end
+
+
+;; ensamblaje de la rigidez
+to-report assemble-global-stiffness [design]
+  let member-areas expand-design-to-members design
+  let global-k zero-matrix total-dofs total-dofs
+
+  let elem-index 0
+  while [elem-index < length member-connectivity] [
+    let elem-conn item elem-index member-connectivity
+    let node-i first elem-conn
+    let node-j last elem-conn
+
+    let area item elem-index member-areas
+    let elem-k element-stiffness-3d area node-i node-j
+    let elem-dofs element-dof-indices node-i node-j
+
+    let local-row 0
+    while [local-row < 6] [
+      let global-row item local-row elem-dofs
+
+      let local-col 0
+      while [local-col < 6] [
+        let global-col item local-col elem-dofs
+        let k-value item local-col (item local-row elem-k)
+
+        set global-k matrix-add global-k global-row global-col k-value
+        set local-col local-col + 1
+      ]
+
+      set local-row local-row + 1
+    ]
+
+    set elem-index elem-index + 1
+  ]
+
+  report global-k
+end
+
+;; masa global lummped (vector diagonal)
+to-report assemble-global-lumped-mass [design]
+  let member-areas expand-design-to-members design
+  let global-m zero-vector total-dofs
+
+  ;; ----------------------------------------
+  ;; 1) masa estructural lumped de las barras
+  ;; ----------------------------------------
+  let elem-index 0
+  while [elem-index < length member-connectivity] [
+    let elem-conn item elem-index member-connectivity
+    let node-i first elem-conn
+    let node-j last elem-conn
+
+    let area item elem-index member-areas
+    let elem-length item elem-index member-lengths
+    let elem-mass (effective-density * area * elem-length)
+
+    let nodal-share (elem-mass / 2)
+
+    let dofs-i node-dof-indices node-i
+    let dofs-j node-dof-indices node-j
+
+    ;; la masa puntual en nodo se aplica a sus 3 DOFs traslacionales
+    let ii 0
+    while [ii < 3] [
+      set global-m vector-add-at global-m (item ii dofs-i) nodal-share
+      set ii ii + 1
+    ]
+
+    let jj 0
+    while [jj < 3] [
+      set global-m vector-add-at global-m (item jj dofs-j) nodal-share
+      set jj jj + 1
+    ]
+
+    set elem-index elem-index + 1
+  ]
+
+  ;; ----------------------------------------
+  ;; 2) masas no estructurales nodales
+  ;; ----------------------------------------
+
+  ;; ápice
+  let apex-dofs node-dof-indices apex-node-id
+  let ia 0
+  while [ia < 3] [
+    set global-m vector-add-at global-m (item ia apex-dofs) apex-extra-mass
+    set ia ia + 1
+  ]
+
+  ;; anillo superior
+  let ur-index 0
+  while [ur-index < length upper-ring-node-ids] [
+    let node-id item ur-index upper-ring-node-ids
+    let dofs node-dof-indices node-id
+
+    let k 0
+    while [k < 3] [
+      set global-m vector-add-at global-m (item k dofs) upper-ring-extra-mass
+      set k k + 1
+    ]
+
+    set ur-index ur-index + 1
+  ]
+
+  ;; anillo intermedio
+  let mr-index 0
+  while [mr-index < length mid-ring-node-ids] [
+    let node-id item mr-index mid-ring-node-ids
+    let dofs node-dof-indices node-id
+
+    let k 0
+    while [k < 3] [
+      set global-m vector-add-at global-m (item k dofs) mid-ring-extra-mass
+      set k k + 1
+    ]
+
+    set mr-index mr-index + 1
+  ]
+
+  report global-m
+end
+
+
+;; pasar probvlema modal a generalizado estandar
+to-report generalized-to-standard-matrix [reduced-k reduced-m]
+  let n length reduced-m
+  let result zero-matrix n n
+
+  let row-index 0
+  while [row-index < n] [
+    let mass-i item row-index reduced-m
+
+    let col-index 0
+    while [col-index < n] [
+      let mass-j item col-index reduced-m
+      let kij item col-index (item row-index reduced-k)
+
+      let value 0
+      if (mass-i > 0) and (mass-j > 0) [
+        set value (kij / sqrt (mass-i * mass-j))
+      ]
+
+      set result matrix-set result row-index col-index value
+      set col-index col-index + 1
+    ]
+
+    set row-index row-index + 1
+  ]
+
+  report result
+end
+
+
+; ----------------------------------------------------------
+; UTILIDADES PARA JACOBI
+; ----------------------------------------------------------
+
+;;Diagonal de una matriz
+to-report matrix-diagonal [mat]
+  let result []
+  let i 0
+
+  while [i < length mat] [
+    set result lput (item i (item i mat)) result
+    set i i + 1
+  ]
+
+  report result
+end
+
+;;Buscar el máximo fuera de diagonal
+to-report max-offdiag-position [mat]
+  let n length mat
+  let best-row 0
+  let best-col 1
+  let best-value 0
+
+  let row-index 0
+  while [row-index < n] [
+    let col-index (row-index + 1)
+    while [col-index < n] [
+      let candidate abs (item col-index (item row-index mat))
+      if candidate > best-value [
+        set best-value candidate
+        set best-row row-index
+        set best-col col-index
+      ]
+      set col-index col-index + 1
+    ]
+    set row-index row-index + 1
+  ]
+
+  report (list best-row best-col best-value)
+end
+
+
+;;Método de Jacobi para autovalores
+to-report jacobi-eigenvalues [input-matrix tolerance max-rotations]
+  let mat input-matrix
+  let n length mat
+  let sweep 0
+
+  while [sweep < max-rotations] [
+    let pivot-info max-offdiag-position mat
+    let p item 0 pivot-info
+    let q item 1 pivot-info
+    let off-value item 2 pivot-info
+
+    if off-value < tolerance [
+      set sweep max-rotations
+    ]
+
+    if off-value >= tolerance [
+      let app item p (item p mat)
+      let aqq item q (item q mat)
+      let apq item q (item p mat)
+
+      let tau ((aqq - app) / (2 * apq))
+      let t 0
+
+      ifelse tau >= 0
+      [ set t (1 / (tau + sqrt (1 + tau * tau))) ]
+      [ set t (-1 / ((- tau) + sqrt (1 + tau * tau))) ]
+
+      let c (1 / sqrt (1 + t * t))
+      let s (t * c)
+
+      ;; actualizar filas/columnas p y q
+      let r 0
+      while [r < n] [
+        if (r != p) and (r != q) [
+          let arp item p (item r mat)
+          let arq item q (item r mat)
+
+          let new-arp (c * arp - s * arq)
+          let new-arq (s * arp + c * arq)
+
+          set mat matrix-set mat r p new-arp
+          set mat matrix-set mat p r new-arp
+
+          set mat matrix-set mat r q new-arq
+          set mat matrix-set mat q r new-arq
+        ]
+        set r r + 1
+      ]
+
+      let new-app (c * c * app - 2 * s * c * apq + s * s * aqq)
+      let new-aqq (s * s * app + 2 * s * c * apq + c * c * aqq)
+
+      set mat matrix-set mat p p new-app
+      set mat matrix-set mat q q new-aqq
+      set mat matrix-set mat p q 0
+      set mat matrix-set mat q p 0
+    ]
+
+    set sweep sweep + 1
+  ]
+
+  report matrix-diagonal mat
+end
+
+
+
+;;-----------
+;;Cálculo de las dos primeras frecuencias naturales
+;;.............
+
+to-report first-two-natural-frequencies [design]
+  let global-k assemble-global-stiffness design
+  let global-m assemble-global-lumped-mass design
+
+  let reduced-k submatrix-by-indices global-k free-dofs
+  let reduced-m subvector-by-indices global-m free-dofs
+
+  let standard-a generalized-to-standard-matrix reduced-k reduced-m
+
+  ;; OJO:
+  ;; 80 era demasiado poco para una matriz 111x111.
+  ;; Aquí usamos muchas más rotaciones Jacobi.
+  let eigvals jacobi-eigenvalues standard-a 1.0e-10 12000
+
+  let positive-eigvals sort (filter [lam -> lam > 1.0e-10] eigvals)
+
+  if length positive-eigvals < 2 [
+    report (list 0 0)
+  ]
+
+  let lambda-1 item 0 positive-eigvals
+  let lambda-2 item 1 positive-eigvals
+
+  let frequency-1 (sqrt lambda-1 / (2 * pi))
+  let frequency-2 (sqrt lambda-2 / (2 * pi))
+
+  report (list frequency-1 frequency-2)
+end
+
+;; peso real del domo
+to-report compute-real-weight [design]
+  let member-areas expand-design-to-members design
+  let total-weight 0
+  let elem-index 0
+
+  while [elem-index < length member-areas] [
+    let area-value item elem-index member-areas
+    let member-length item elem-index member-lengths
+
+    set total-weight total-weight + (effective-density * area-value * member-length)
+    set elem-index elem-index + 1
+  ]
+
+  report total-weight
+end
+
+
+; ----------------------------------------------------------
+; FITNESS
+; ----------------------------------------------------------
+to-report evaluate-design-120 [design]
+  let weight compute-real-weight design
+
+  let freqs first-two-natural-frequencies design
+  let frequency-1 item 0 freqs
+  let frequency-2 item 1 freqs
+
+  let violation 0
+
+  if frequency-1 < min-frequency-1 [
+    set violation violation + ((min-frequency-1 - frequency-1) / min-frequency-1)
+  ]
+
+  if frequency-2 < min-frequency-2 [
+    set violation violation + ((min-frequency-2 - frequency-2) / min-frequency-2)
+  ]
+
+  let progress 0
+  if max-iterations > 0 [
+    set progress (ticks / max-iterations)
+  ]
+  if progress > 1 [ set progress 1 ]
+
+  let penalty-exponent (1.5 + 1.5 * progress)
+
+  report ((1 + violation) ^ penalty-exponent) * weight
+end
+
+
+
+
+
+; ----------------------------------------------------------
+; MEJOR GLOBAL INICIAL
+; ----------------------------------------------------------
+to initialize-global-best
+  ask min-one-of particles [p-best-val] [
+    set g-best-vars p-best-vars
+    set g-best-val p-best-val
+  ]
+end
+
+; ----------------------------------------------------------
+; GENERAR UN DISEÑO ALEATORIO DENTRO DE LÍMITES
+; ----------------------------------------------------------
+to-report random-design
+  report random-vector-between lower-bounds upper-bounds
+end
+
+; ----------------------------------------------------------
+; ACTUALIZAR MEJORES PERSONALES Y GLOBAL
+; ----------------------------------------------------------
+to update-personal-global-best
+  ask particles [
+    set current-val evaluate-design vars
+
+    if current-val < p-best-val [
+      set p-best-val current-val
+      set p-best-vars vars
+    ]
+  ]
+
+  ask min-one-of particles [p-best-val] [
+    if p-best-val < g-best-val [
+      set g-best-val p-best-val
+      set g-best-vars p-best-vars
+    ]
+  ]
+end
+
+; ==========================================================
+; BUCLE PRINCIPAL — CSA VECTORIAL
+; ==========================================================
+to go
+  ;; si quieres parar en un máximo de iteraciones:
+  if ticks >= max-iterations [ stop ]
+
+  ;; 1) Actualizar mejores con posiciones actuales
+  update-personal-global-best
+
+  ;; 2) μ(t): decaimiento lineal exploración → explotación
+  let tau (ticks / max-iterations)
+  if tau > 1 [ set tau 1 ]
+  let mu (mu-max - (mu-max - mu-min) * tau)
+
+  ;; 3) CSA por partícula: Percepción → Rotación → Caza
+  ask particles [
+
+    ;; ── Fase 1: Percepción / Búsqueda ─────────────────────
+    ;; Con prob. Pp → exploración aleatoria
+    ;; Con prob. 1-Pp → paso hacia p-best o g-best
+    ifelse (random-float 1.0 < Pp)
+    [
+      let rand-dir random-uniform-vector number-of-groups
+      let step (vec-scale (mu * attraction-to-personal-best) rand-dir)
+
+      set vars (vec-clip (vec-add vars step) lower-bounds upper-bounds)
+    ]
+    [
+      ifelse (random-float 1.0 < 0.5)
+      [
+        ;; Movimiento normalizado hacia mejor personal
+        let d (vec-sub p-best-vars vars)
+        let nd vec-norm d
+
+        if nd > 0 [
+          let step (vec-scale (mu * attraction-to-personal-best / nd) d)
+          set vars (vec-clip (vec-add vars step) lower-bounds upper-bounds)
+        ]
+      ]
+      [
+        ;; Movimiento normalizado hacia mejor global
+        let d (vec-sub g-best-vars vars)
+        let nd vec-norm d
+
+        if nd > 0 [
+          let step (vec-scale (mu * attraction-to-personal-best / nd) d)
+          set vars (vec-clip (vec-add vars step) lower-bounds upper-bounds)
+        ]
+      ]
+    ]
+
+    ;; ── Fase 2: Rotación ocular / perturbación local ──────
+    ;; En N dimensiones lo modelamos como una perturbación aleatoria suave
+    let eye-step (mu * 0.5 * (0.5 + random-float 0.5))
+    let noise (vec-scale eye-step (random-uniform-vector number-of-groups))
+
+    set vars (vec-clip (vec-add vars noise) lower-bounds upper-bounds)
+
+    ;; ── Fase 3: Caza / proyección de lengua ───────────────
+    let r1 random-float 1.0
+    let r2 random-float 1.0
+
+    let term1 (vec-scale r1 (vec-sub p-best-vars vars))
+    let term2 (vec-scale r2 (vec-sub g-best-vars vars))
+    let acc (vec-scale (attraction-to-global-best / 2) (vec-add term1 term2))
+
+    set vel (vec-add (vec-scale particle-inertia vel) acc)
+
+    ;; Limitar velocidad por componente
+    set vel (vec-limit-components vel particle-speed-limit)
+
+    ;; Aplicar movimiento
+    set vars (vec-clip (vec-add vars vel) lower-bounds upper-bounds)
+  ]
+
+  update-plots
+  tick
+end
+
+; ==========================================================
+; EVALUACIÓN DE LA SOLUCIÓN
+; ==========================================================
+
+to-report evaluate-design [design]
+  report evaluate-design-120 design
+end
+
+
+; ==========================================================
+; UTILIDADES VECTORIALES
+; ==========================================================
+
+to-report vec-add [a b]
+  report (map [[x y] -> x + y] a b)
+end
+
+to-report vec-sub [a b]
+  report (map [[x y] -> x - y] a b)
+end
+
+to-report vec-scale [s a]
+  report (map [x -> s * x] a)
+end
+
+to-report vec-norm [a]
+  report sqrt (sum (map [x -> x * x] a))
+end
+
+to-report vec-clip [a low high]
+  report (map [[x lo hi] -> max list lo (min list x hi)] a low high)
+end
+
+to-report vec-limit-components [a lim]
+  report (map [x -> max list (- lim) (min list x lim)] a)
+end
+
+to-report random-vector-between [low high]
+  report (map [[lo hi] -> lo + random-float (hi - lo)] low high)
+end
+
+to-report random-normal-vector [n sigma]
+  report n-values n [ -> random-normal 0 sigma ]
+end
+
+to-report random-uniform-vector [n]
+  report n-values n [ -> (random-float 2 - 1) ]
+end
+
+
+
+
+
+
+
+
+
+
+;; control
+
+
+
+to print-120bar-model-summary
+  show "=============================================="
+  show "RESUMEN MODELO DOMO 120 BARRAS"
+  show "=============================================="
+
+  show (word "NODOS = " length node-coords)
+  show (word "BARRAS = " length member-connectivity)
+  show (word "GRUPOS (conteo) = " member-group-counts)
+  show (word "NODOS APOYADOS = " length support-node-ids)
+  show (word "DOFS TOTALES = " total-dofs)
+  show (word "DOFS LIBRES = " length free-dofs)
+
+  show "=============================================="
+end
+
+to print-120bar-full-validation
+  show "=============================================="
+  show "VALIDACION COMPLETA MODELO DOMO 120 BARRAS"
+  show "=============================================="
+
+  show (word "NODOS = " length node-coords)
+  show (word "BARRAS = " length member-connectivity)
+  show (word "GRUPOS (conteo) = " member-group-counts)
+  show (word "NODOS APOYADOS = " length support-node-ids)
+  show (word "DOFS TOTALES = " total-dofs)
+  show (word "DOFS RESTRINGIDOS = " length restrained-dofs)
+  show (word "DOFS LIBRES = " length free-dofs)
+
+  show (word "ANILLO EXTERIOR = " outer-ring-node-ids)
+  show (word "ANILLO INTERMEDIO = " mid-ring-node-ids)
+  show (word "ANILLO SUPERIOR = " upper-ring-node-ids)
+  show (word "APICE = " apex-node-id)
+
+  show (word "LONGITUD MIN = " precision (min member-lengths) 6 " m")
+  show (word "LONGITUD MAX = " precision (max member-lengths) 6 " m")
+
+  show "=============================================="
+end
+
+to check-120bar-benchmark-consistency
+  show "=============================================="
+  show "CHECK CONSISTENCIA BENCHMARK 120-BAR"
+  show "=============================================="
+
+  ifelse (length node-coords = 49)
+    [ show "OK: numero de nodos = 49" ]
+    [ show (word "ERROR: nodos = " length node-coords " (esperado 49)") ]
+
+  ifelse (length member-connectivity = 120)
+    [ show "OK: numero de barras = 120" ]
+    [ show (word "ERROR: barras = " length member-connectivity " (esperado 120)") ]
+
+  ifelse (member-group-counts = [12 12 12 24 24 12 24])
+    [ show "OK: grupos = [12 12 12 24 24 12 24]" ]
+    [ show (word "ERROR: grupos = " member-group-counts) ]
+
+  ifelse (length support-node-ids = 12)
+    [ show "OK: nodos apoyados = 12" ]
+    [ show (word "ERROR: apoyos = " length support-node-ids " (esperado 12)") ]
+
+  ifelse (total-dofs = 147)
+    [ show "OK: dofs totales = 147" ]
+    [ show (word "ERROR: dofs totales = " total-dofs " (esperado 147)") ]
+
+  ifelse (length free-dofs = 111)
+    [ show "OK: dofs libres = 111" ]
+    [ show (word "ERROR: dofs libres = " length free-dofs " (esperado 111)") ]
+
+  show "=============================================="
+end
+
+to print-120bar-problem-parameters
+  show "=============================================="
+  show "PARAMETROS EFECTIVOS DEL PROBLEMA 120-BAR"
+  show "=============================================="
+
+  show (word "young-modulus-factor = " precision young-modulus-factor 4)
+  show (word "density-factor = " precision density-factor 4)
+  show (word "nonstructural-mass-factor = " precision nonstructural-mass-factor 4)
+  show (word "frequency-target-factor = " precision frequency-target-factor 4)
+
+  show (word "E efectivo = " precision effective-young-modulus 6 " Pa")
+  show (word "densidad efectiva = " precision effective-density 6 " kg/m^3")
+
+  show (word "f1 minima = " precision min-frequency-1 6 " Hz")
+  show (word "f2 minima = " precision min-frequency-2 6 " Hz")
+
+  show (word "masa extra apice = " precision apex-extra-mass 6 " kg")
+  show (word "masa extra anillo superior = " precision upper-ring-extra-mass 6 " kg")
+  show (word "masa extra anillo intermedio = " precision mid-ring-extra-mass 6 " kg")
+
+  show "=============================================="
+end
+
+
+to print-current-best-design
+  show "=============================================="
+  show "MEJOR DISENO ACTUAL"
+  show "=============================================="
+
+  if empty? g-best-vars [
+    show "g-best-vars aun no esta inicializado"
+    stop
+  ]
+
+  show (word
+    "A1=" precision (item 0 g-best-vars) 4
+    "  A2=" precision (item 1 g-best-vars) 4
+    "  A3=" precision (item 2 g-best-vars) 4
+    "  A4=" precision (item 3 g-best-vars) 4
+    "  A5=" precision (item 4 g-best-vars) 4
+    "  A6=" precision (item 5 g-best-vars) 4
+    "  A7=" precision (item 6 g-best-vars) 4
+  )
+
+  show (word "fitness actual = " precision g-best-val 6)
+  show (word "peso real = " precision (compute-real-weight g-best-vars) 6 " kg")
+
+  show "=============================================="
+end
+
+
+
+to print-120bar-startup-check
+  print-120bar-problem-parameters
+  print-120bar-model-summary
+  check-120bar-benchmark-consistency
+end
+
+to print-frequencies-for-design [design]
+  let freqs first-two-natural-frequencies design
+  show "=============================================="
+  show "FRECUENCIAS DEL DISENO"
+  show "=============================================="
+  show (word "f1 = " precision (item 0 freqs) 6 " Hz")
+  show (word "f2 = " precision (item 1 freqs) 6 " Hz")
+  show "=============================================="
+end
+
+
+to print-current-best-dynamic-status
+  if empty? g-best-vars [
+    show "g-best-vars aun no esta inicializado"
+    stop
+  ]
+
+  let freqs first-two-natural-frequencies g-best-vars
+  let frequency-1 item 0 freqs
+  let frequency-2 item 1 freqs
+
+  let violation 0
+  if frequency-1 < min-frequency-1 [
+    set violation violation + ((min-frequency-1 - frequency-1) / min-frequency-1)
+  ]
+  if frequency-2 < min-frequency-2 [
+    set violation violation + ((min-frequency-2 - frequency-2) / min-frequency-2)
+  ]
+
+  show "=============================================="
+  show "ESTADO DINAMICO DEL MEJOR DISENO ACTUAL"
+  show "=============================================="
+  show (word "f1 = " precision frequency-1 6 " Hz")
+  show (word "f2 = " precision frequency-2 6 " Hz")
+  show (word "f1 minima = " precision min-frequency-1 6 " Hz")
+  show (word "f2 minima = " precision min-frequency-2 6 " Hz")
+  show (word "violacion total = " precision violation 6)
+  show (word "peso real = " precision (compute-real-weight g-best-vars) 6 " kg")
+  show (word "fitness penalizado = " precision (evaluate-design-120 g-best-vars) 6)
+  show "=============================================="
+end
+
+
+to print-weight-breakdown-for-design [design]
+  let expected-counts member-group-counts
+  let start-index 0
+  let group-index 0
+  let total-weight 0
+
+  show "=============================================="
+  show "DESGLOSE DE PESO POR GRUPO"
+  show "=============================================="
+
+  while [group-index < length design] [
+    let area-cm2 item group-index design
+    let area-m2 (area-cm2 * 1.0e-4)
+    let group-size item group-index expected-counts
+
+    let group-weight 0
+    let local-index 0
+
+    while [local-index < group-size] [
+      let elem-index (start-index + local-index)
+      let member-length item elem-index member-lengths
+      set group-weight group-weight + (effective-density * area-m2 * member-length)
+      set local-index local-index + 1
+    ]
+
+    set total-weight total-weight + group-weight
+
+    show (word
+      "Grupo " (group-index + 1)
+      " | area = " precision area-cm2 6 " cm^2"
+      " | barras = " group-size
+      " | peso grupo = " precision group-weight 6 " kg"
+    )
+
+    set start-index (start-index + group-size)
+    set group-index (group-index + 1)
+  ]
+
+  show "----------------------------------------------"
+  show (word "PESO TOTAL = " precision total-weight 6 " kg")
+  show "=============================================="
+end
+
+to print-group-length-breakdown
+  let start-index 0
+  let group-index 0
+
+  show "=============================================="
+  show "LONGITUD TOTAL POR GRUPO"
+  show "=============================================="
+
+  while [group-index < length member-group-counts] [
+    let group-size item group-index member-group-counts
+    let group-length-total 0
+    let local-index 0
+
+    while [local-index < group-size] [
+      let elem-index (start-index + local-index)
+      set group-length-total group-length-total + (item elem-index member-lengths)
+      set local-index local-index + 1
+    ]
+
+    show (word
+      "Grupo " (group-index + 1)
+      " | barras = " group-size
+      " | longitud total = " precision group-length-total 6 " m"
+    )
+
+    set start-index (start-index + group-size)
+    set group-index (group-index + 1)
+  ]
+
+  show "=============================================="
+end
+
+]]></code>
+  <widgets>
+    <view3d wrappingAllowedZ="true" x="0" wrappingAllowedX="true" y="0" minPycor="-20" height="255" showTickCounter="true" patchSize="6.0" fontSize="10" wrappingAllowedY="true" width="254" tickCounterLabel="ticks" maxPycor="20" updateMode="1" frameRate="30.0" maxPzcor="20" maxPxcor="20" minPxcor="-20" minPzcor="0"></view3d>
+    <button x="241" y="65" height="47" disableUntilTicks="false" forever="false" kind="Observer" width="102" sizeVersion="0">setup</button>
+    <button x="240" y="174" height="44" disableUntilTicks="false" forever="true" kind="Observer" width="103" sizeVersion="0">go</button>
+    <button x="241" y="120" height="46" disableUntilTicks="false" forever="false" kind="Observer" display="step" width="102" sizeVersion="0">go</button>
+    <slider x="381" step="1" y="30" max="100" display="population-size" height="33" min="1" direction="Horizontal" default="20.0" variable="population-size" width="174" sizeVersion="0"></slider>
+    <slider x="381" step="0.1" y="75" max="5.0" display="mu-max" height="33" min="0.1" direction="Horizontal" default="1.0" variable="mu-max" width="174" sizeVersion="0"></slider>
+    <slider x="381" step="0.01" y="115" max="1.0" display="mu-min" height="33" min="0.01" direction="Horizontal" default="0.1" variable="mu-min" width="174" sizeVersion="0"></slider>
+    <slider x="381" step="0.05" y="155" max="1.0" display="Pp" height="33" min="0.0" direction="Horizontal" default="0.1" variable="Pp" width="174" sizeVersion="0"></slider>
+    <slider x="381" step="10" y="195" max="1000" display="max-iterations" height="33" min="10" direction="Horizontal" default="500.0" variable="max-iterations" width="174" sizeVersion="0"></slider>
+    <slider x="381" step="0.05" y="235" max="1.0" display="particle-inertia" height="33" min="0.0" direction="Horizontal" default="0.7" variable="particle-inertia" width="174" sizeVersion="0"></slider>
+    <slider x="381" step="0.1" y="315" max="3.0" display="attraction-to-global-best" height="33" min="0.0" direction="Horizontal" default="1.5" variable="attraction-to-global-best" width="202" sizeVersion="0"></slider>
+    <slider x="381" step="0.5" y="355" max="10.0" display="particle-speed-limit" height="33" min="0.5" direction="Horizontal" default="3.0" variable="particle-speed-limit" width="174" sizeVersion="0"></slider>
+    <plot x="18" autoPlotX="true" yMax="10.0" autoPlotY="true" yAxis="fitness" y="306" xMin="0.0" height="200" legend="true" xMax="10.0" yMin="0.0" xAxis="iteración" display="Convergencia" width="342" sizeVersion="0">
+      <setup></setup>
+      <update></update>
+      <pen interval="1.0" mode="0" display="media" color="-10899396" legend="true">
+        <setup></setup>
+        <update>plot mean [current-val] of particles</update>
+      </pen>
+      <pen interval="1.0" mode="0" display="mejor" color="-2674135" legend="true">
+        <setup></setup>
+        <update>plot g-best-val</update>
+      </pen>
+      <pen interval="1.0" mode="0" display="peor" color="-13791810" legend="true">
+        <setup></setup>
+        <update>plot max [current-val] of particles</update>
+      </pen>
+    </plot>
+    <slider x="381" step="0.1" y="277" max="3.0" display="attraction-to-personal-best" height="33" min="0.0" direction="Horizontal" default="1.0" variable="attraction-to-personal-best" width="203" sizeVersion="0"></slider>
+    <monitor x="379" precision="2" y="400" height="92" fontSize="11" width="509" display="g-best-vars-text">g-best-vars-text</monitor>
+    <monitor x="595" precision="5" y="327" height="60" fontSize="11" width="100" display="g-best-val">g-best-val</monitor>
+    <slider x="10" step="0.01" y="24" max="1.30" width="210" display="young-modulus-factor" height="51" min="0.70" direction="Horizontal" default="1.0" variable="young-modulus-factor"></slider>
+    <slider x="8" step="0.01" y="89" max="1.30" width="210" display="density-factor" height="51" min="0.70" direction="Horizontal" default="1.0" variable="density-factor"></slider>
+    <slider x="6" step="0.01" y="152" max="1.50" width="210" display="nonstructural-mass-factor" height="51" min="0.50" direction="Horizontal" default="1.0" variable="nonstructural-mass-factor"></slider>
+    <slider x="8" step="0.01" y="215" max="1.25" width="210" display="frequency-target-factor" height="51" min="0.80" direction="Horizontal" default="1.0" variable="frequency-target-factor"></slider>
+  </widgets>
+  <info>## ¿QUÉ ES ESTO?
+
+Implementación del Algoritmo de Enjambre de Camaleones (CSA) para NetLogo 3D 7.0.3.
+Minimiza la función esfera f(x,y) = x² + y² (mínimo global en el origen).
+
+## PARÁMETROS
+
+**MU-MAX / MU-MIN** — Rango del paso adaptativo μ(t). Decrece linealmente con las iteraciones. Valores recomendados: mu-max=1.0, mu-min=0.1.
+
+**Pp** — Probabilidad de exploración aleatoria en Fase 1. Valor recomendado: 0.05–0.15.
+
+**MAX-ITERATIONS** — Iteraciones totales para el decaimiento de μ. Recomendado: 500.
+
+**PARTICLE-INERTIA** — Amortiguación de la velocidad de lengua (Fase 3). Recomendado: 0.7.
+
+**ATTRACTION-TO-PERSONAL-BEST** — Ganancia hacia Pi en Fase 1 (explotación) y Fase 3. Recomendado: 1.0.
+
+**ATTRACTION-TO-GLOBAL-BEST** — Ganancia de atracción hacia G en Fase 3 (proyección de lengua). Recomendado: 1.5.
+
+**PARTICLE-SPEED-LIMIT** — Velocidad máxima de la proyección de lengua. Recomendado: 3.0.
+
+## FASES DEL CSA
+
+**Fase 1 – Percepción:** con prob. Pp exploración aleatoria en [-1,1]×μ; si no, paso normalizado hacia Pi o G (50/50).
+
+**Fase 2 – Rotación ocular:** giro aleatorio de heading + avance, incondicional para todos los agentes cada tick.
+
+**Fase 3 – Caza (lengua):** velocidad acumulada con inercia (particle-inertia) que atrae simultáneamente a Pi y G con pesos aleatorios independientes r1, r2. Esta doble atracción con momentum es la clave de la convergencia.
+
+## CRÉDITOS
+
+Raul Caubera Jimenez para  TFG del Grado de Informatica de UGR 2026
+CSA basado en: Malik et al., "Chameleon Swarm Algorithm: A Bio-Inspired Optimizer for Solving Engineering Design Problems."
+Adaptado para NetLogo 3D 7.0.3.
+CC BY-NC-SA 4.0</info>
+  <turtleShapes>
+    <shape name="default" rotatable="true" editableColorIndex="0">
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="150" y="5"></point>
+        <point x="40" y="250"></point>
+        <point x="150" y="205"></point>
+        <point x="260" y="250"></point>
+      </polygon>
+    </shape>
+    <shape name="airplane" rotatable="true" editableColorIndex="0">
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="150" y="0"></point>
+        <point x="135" y="15"></point>
+        <point x="120" y="60"></point>
+        <point x="120" y="105"></point>
+        <point x="15" y="165"></point>
+        <point x="15" y="195"></point>
+        <point x="120" y="180"></point>
+        <point x="135" y="240"></point>
+        <point x="105" y="270"></point>
+        <point x="120" y="285"></point>
+        <point x="150" y="270"></point>
+        <point x="180" y="285"></point>
+        <point x="210" y="270"></point>
+        <point x="165" y="240"></point>
+        <point x="180" y="180"></point>
+        <point x="285" y="195"></point>
+        <point x="285" y="165"></point>
+        <point x="180" y="105"></point>
+        <point x="180" y="60"></point>
+        <point x="165" y="15"></point>
+      </polygon>
+    </shape>
+    <shape name="arrow" rotatable="true" editableColorIndex="0">
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="150" y="0"></point>
+        <point x="0" y="150"></point>
+        <point x="105" y="150"></point>
+        <point x="105" y="293"></point>
+        <point x="195" y="293"></point>
+        <point x="195" y="150"></point>
+        <point x="300" y="150"></point>
+      </polygon>
+    </shape>
+    <shape name="box" rotatable="false" editableColorIndex="0">
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="150" y="285"></point>
+        <point x="285" y="225"></point>
+        <point x="285" y="75"></point>
+        <point x="150" y="135"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="150" y="135"></point>
+        <point x="15" y="75"></point>
+        <point x="150" y="15"></point>
+        <point x="285" y="75"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="15" y="75"></point>
+        <point x="15" y="225"></point>
+        <point x="150" y="285"></point>
+        <point x="150" y="135"></point>
+      </polygon>
+      <line endX="150" startY="285" marked="false" color="255" endY="135" startX="150"></line>
+      <line endX="15" startY="135" marked="false" color="255" endY="75" startX="150"></line>
+      <line endX="285" startY="135" marked="false" color="255" endY="75" startX="150"></line>
+    </shape>
+    <shape name="bug" rotatable="true" editableColorIndex="0">
+      <circle x="96" y="182" marked="true" color="-1920102913" diameter="108" filled="true"></circle>
+      <circle x="110" y="127" marked="true" color="-1920102913" diameter="80" filled="true"></circle>
+      <circle x="110" y="75" marked="true" color="-1920102913" diameter="80" filled="true"></circle>
+      <line endX="80" startY="100" marked="true" color="-1920102913" endY="30" startX="150"></line>
+      <line endX="220" startY="100" marked="true" color="-1920102913" endY="30" startX="150"></line>
+    </shape>
+    <shape name="butterfly" rotatable="true" editableColorIndex="0">
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="150" y="165"></point>
+        <point x="209" y="199"></point>
+        <point x="225" y="225"></point>
+        <point x="225" y="255"></point>
+        <point x="195" y="270"></point>
+        <point x="165" y="255"></point>
+        <point x="150" y="240"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="150" y="165"></point>
+        <point x="89" y="198"></point>
+        <point x="75" y="225"></point>
+        <point x="75" y="255"></point>
+        <point x="105" y="270"></point>
+        <point x="135" y="255"></point>
+        <point x="150" y="240"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="139" y="148"></point>
+        <point x="100" y="105"></point>
+        <point x="55" y="90"></point>
+        <point x="25" y="90"></point>
+        <point x="10" y="105"></point>
+        <point x="10" y="135"></point>
+        <point x="25" y="180"></point>
+        <point x="40" y="195"></point>
+        <point x="85" y="194"></point>
+        <point x="139" y="163"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="162" y="150"></point>
+        <point x="200" y="105"></point>
+        <point x="245" y="90"></point>
+        <point x="275" y="90"></point>
+        <point x="290" y="105"></point>
+        <point x="290" y="135"></point>
+        <point x="275" y="180"></point>
+        <point x="260" y="195"></point>
+        <point x="215" y="195"></point>
+        <point x="162" y="165"></point>
+      </polygon>
+      <polygon color="255" filled="true" marked="false">
+        <point x="150" y="255"></point>
+        <point x="135" y="225"></point>
+        <point x="120" y="150"></point>
+        <point x="135" y="120"></point>
+        <point x="150" y="105"></point>
+        <point x="165" y="120"></point>
+        <point x="180" y="150"></point>
+        <point x="165" y="225"></point>
+      </polygon>
+      <circle x="135" y="90" marked="false" color="255" diameter="30" filled="true"></circle>
+      <line endX="195" startY="105" marked="false" color="255" endY="60" startX="150"></line>
+      <line endX="105" startY="105" marked="false" color="255" endY="60" startX="150"></line>
+    </shape>
+    <shape name="car" rotatable="false" editableColorIndex="0">
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="300" y="180"></point>
+        <point x="279" y="164"></point>
+        <point x="261" y="144"></point>
+        <point x="240" y="135"></point>
+        <point x="226" y="132"></point>
+        <point x="213" y="106"></point>
+        <point x="203" y="84"></point>
+        <point x="185" y="63"></point>
+        <point x="159" y="50"></point>
+        <point x="135" y="50"></point>
+        <point x="75" y="60"></point>
+        <point x="0" y="150"></point>
+        <point x="0" y="165"></point>
+        <point x="0" y="225"></point>
+        <point x="300" y="225"></point>
+        <point x="300" y="180"></point>
+      </polygon>
+      <circle x="180" y="180" marked="false" color="255" diameter="90" filled="true"></circle>
+      <circle x="30" y="180" marked="false" color="255" diameter="90" filled="true"></circle>
+      <polygon color="255" filled="true" marked="false">
+        <point x="162" y="80"></point>
+        <point x="132" y="78"></point>
+        <point x="134" y="135"></point>
+        <point x="209" y="135"></point>
+        <point x="194" y="105"></point>
+        <point x="189" y="96"></point>
+        <point x="180" y="89"></point>
+      </polygon>
+      <circle x="47" y="195" marked="true" color="-1920102913" diameter="58" filled="true"></circle>
+      <circle x="195" y="195" marked="true" color="-1920102913" diameter="58" filled="true"></circle>
+    </shape>
+    <shape name="circle" rotatable="false" editableColorIndex="0">
+      <circle x="0" y="0" marked="true" color="-1920102913" diameter="300" filled="true"></circle>
+    </shape>
+    <shape name="circle 2" rotatable="false" editableColorIndex="0">
+      <circle x="0" y="0" marked="true" color="-1920102913" diameter="300" filled="true"></circle>
+      <circle x="30" y="30" marked="false" color="255" diameter="240" filled="true"></circle>
+    </shape>
+    <shape name="cow" rotatable="false" editableColorIndex="0">
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="200" y="193"></point>
+        <point x="197" y="249"></point>
+        <point x="179" y="249"></point>
+        <point x="177" y="196"></point>
+        <point x="166" y="187"></point>
+        <point x="140" y="189"></point>
+        <point x="93" y="191"></point>
+        <point x="78" y="179"></point>
+        <point x="72" y="211"></point>
+        <point x="49" y="209"></point>
+        <point x="48" y="181"></point>
+        <point x="37" y="149"></point>
+        <point x="25" y="120"></point>
+        <point x="25" y="89"></point>
+        <point x="45" y="72"></point>
+        <point x="103" y="84"></point>
+        <point x="179" y="75"></point>
+        <point x="198" y="76"></point>
+        <point x="252" y="64"></point>
+        <point x="272" y="81"></point>
+        <point x="293" y="103"></point>
+        <point x="285" y="121"></point>
+        <point x="255" y="121"></point>
+        <point x="242" y="118"></point>
+        <point x="224" y="167"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="73" y="210"></point>
+        <point x="86" y="251"></point>
+        <point x="62" y="249"></point>
+        <point x="48" y="208"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="25" y="114"></point>
+        <point x="16" y="195"></point>
+        <point x="9" y="204"></point>
+        <point x="23" y="213"></point>
+        <point x="25" y="200"></point>
+        <point x="39" y="123"></point>
+      </polygon>
+    </shape>
+    <shape name="cylinder" rotatable="false" editableColorIndex="0">
+      <circle x="0" y="0" marked="true" color="-1920102913" diameter="300" filled="true"></circle>
+    </shape>
+    <shape name="dot" rotatable="false" editableColorIndex="0">
+      <circle x="90" y="90" marked="true" color="-1920102913" diameter="120" filled="true"></circle>
+    </shape>
+    <shape name="face happy" rotatable="false" editableColorIndex="0">
+      <circle x="8" y="8" marked="true" color="-1920102913" diameter="285" filled="true"></circle>
+      <circle x="60" y="75" marked="false" color="255" diameter="60" filled="true"></circle>
+      <circle x="180" y="75" marked="false" color="255" diameter="60" filled="true"></circle>
+      <polygon color="255" filled="true" marked="false">
+        <point x="150" y="255"></point>
+        <point x="90" y="239"></point>
+        <point x="62" y="213"></point>
+        <point x="47" y="191"></point>
+        <point x="67" y="179"></point>
+        <point x="90" y="203"></point>
+        <point x="109" y="218"></point>
+        <point x="150" y="225"></point>
+        <point x="192" y="218"></point>
+        <point x="210" y="203"></point>
+        <point x="227" y="181"></point>
+        <point x="251" y="194"></point>
+        <point x="236" y="217"></point>
+        <point x="212" y="240"></point>
+      </polygon>
+    </shape>
+    <shape name="face neutral" rotatable="false" editableColorIndex="0">
+      <circle x="8" y="7" marked="true" color="-1920102913" diameter="285" filled="true"></circle>
+      <circle x="60" y="75" marked="false" color="255" diameter="60" filled="true"></circle>
+      <circle x="180" y="75" marked="false" color="255" diameter="60" filled="true"></circle>
+      <rectangle endX="240" startY="195" marked="false" color="255" endY="225" startX="60" filled="true"></rectangle>
+    </shape>
+    <shape name="face sad" rotatable="false" editableColorIndex="0">
+      <circle x="8" y="8" marked="true" color="-1920102913" diameter="285" filled="true"></circle>
+      <circle x="60" y="75" marked="false" color="255" diameter="60" filled="true"></circle>
+      <circle x="180" y="75" marked="false" color="255" diameter="60" filled="true"></circle>
+      <polygon color="255" filled="true" marked="false">
+        <point x="150" y="168"></point>
+        <point x="90" y="184"></point>
+        <point x="62" y="210"></point>
+        <point x="47" y="232"></point>
+        <point x="67" y="244"></point>
+        <point x="90" y="220"></point>
+        <point x="109" y="205"></point>
+        <point x="150" y="198"></point>
+        <point x="192" y="205"></point>
+        <point x="210" y="220"></point>
+        <point x="227" y="242"></point>
+        <point x="251" y="229"></point>
+        <point x="236" y="206"></point>
+        <point x="212" y="183"></point>
+      </polygon>
+    </shape>
+    <shape name="fish" rotatable="false" editableColorIndex="0">
+      <polygon color="-1" filled="true" marked="false">
+        <point x="44" y="131"></point>
+        <point x="21" y="87"></point>
+        <point x="15" y="86"></point>
+        <point x="0" y="120"></point>
+        <point x="15" y="150"></point>
+        <point x="0" y="180"></point>
+        <point x="13" y="214"></point>
+        <point x="20" y="212"></point>
+        <point x="45" y="166"></point>
+      </polygon>
+      <polygon color="-1" filled="true" marked="false">
+        <point x="135" y="195"></point>
+        <point x="119" y="235"></point>
+        <point x="95" y="218"></point>
+        <point x="76" y="210"></point>
+        <point x="46" y="204"></point>
+        <point x="60" y="165"></point>
+      </polygon>
+      <polygon color="-1" filled="true" marked="false">
+        <point x="75" y="45"></point>
+        <point x="83" y="77"></point>
+        <point x="71" y="103"></point>
+        <point x="86" y="114"></point>
+        <point x="166" y="78"></point>
+        <point x="135" y="60"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="30" y="136"></point>
+        <point x="151" y="77"></point>
+        <point x="226" y="81"></point>
+        <point x="280" y="119"></point>
+        <point x="292" y="146"></point>
+        <point x="292" y="160"></point>
+        <point x="287" y="170"></point>
+        <point x="270" y="195"></point>
+        <point x="195" y="210"></point>
+        <point x="151" y="212"></point>
+        <point x="30" y="166"></point>
+      </polygon>
+      <circle x="215" y="106" marked="false" color="255" diameter="30" filled="true"></circle>
+    </shape>
+    <shape name="flag" rotatable="false" editableColorIndex="0">
+      <rectangle endX="75" startY="15" marked="true" color="-1920102913" endY="300" startX="60" filled="true"></rectangle>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="90" y="150"></point>
+        <point x="270" y="90"></point>
+        <point x="90" y="30"></point>
+      </polygon>
+      <line endX="90" startY="135" marked="true" color="-1920102913" endY="135" startX="75"></line>
+      <line endX="90" startY="45" marked="true" color="-1920102913" endY="45" startX="75"></line>
+    </shape>
+    <shape name="flower" rotatable="false" editableColorIndex="0">
+      <polygon color="1504722175" filled="true" marked="false">
+        <point x="135" y="120"></point>
+        <point x="165" y="165"></point>
+        <point x="180" y="210"></point>
+        <point x="180" y="240"></point>
+        <point x="150" y="300"></point>
+        <point x="165" y="300"></point>
+        <point x="195" y="240"></point>
+        <point x="195" y="195"></point>
+        <point x="165" y="135"></point>
+      </polygon>
+      <circle x="85" y="132" marked="true" color="-1920102913" diameter="38" filled="true"></circle>
+      <circle x="130" y="147" marked="true" color="-1920102913" diameter="38" filled="true"></circle>
+      <circle x="192" y="85" marked="true" color="-1920102913" diameter="38" filled="true"></circle>
+      <circle x="85" y="40" marked="true" color="-1920102913" diameter="38" filled="true"></circle>
+      <circle x="177" y="40" marked="true" color="-1920102913" diameter="38" filled="true"></circle>
+      <circle x="177" y="132" marked="true" color="-1920102913" diameter="38" filled="true"></circle>
+      <circle x="70" y="85" marked="true" color="-1920102913" diameter="38" filled="true"></circle>
+      <circle x="130" y="25" marked="true" color="-1920102913" diameter="38" filled="true"></circle>
+      <circle x="96" y="51" marked="true" color="-1920102913" diameter="108" filled="true"></circle>
+      <circle x="113" y="68" marked="false" color="255" diameter="74" filled="true"></circle>
+      <polygon color="1504722175" filled="true" marked="false">
+        <point x="189" y="233"></point>
+        <point x="219" y="188"></point>
+        <point x="249" y="173"></point>
+        <point x="279" y="188"></point>
+        <point x="234" y="218"></point>
+      </polygon>
+      <polygon color="1504722175" filled="true" marked="false">
+        <point x="180" y="255"></point>
+        <point x="150" y="210"></point>
+        <point x="105" y="210"></point>
+        <point x="75" y="240"></point>
+        <point x="135" y="240"></point>
+      </polygon>
+    </shape>
+    <shape name="house" rotatable="false" editableColorIndex="0">
+      <rectangle endX="255" startY="120" marked="true" color="-1920102913" endY="285" startX="45" filled="true"></rectangle>
+      <rectangle endX="180" startY="210" marked="false" color="255" endY="285" startX="120" filled="true"></rectangle>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="15" y="120"></point>
+        <point x="150" y="15"></point>
+        <point x="285" y="120"></point>
+      </polygon>
+      <line endX="270" startY="120" marked="false" color="255" endY="120" startX="30"></line>
+    </shape>
+    <shape name="leaf" rotatable="false" editableColorIndex="0">
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="150" y="210"></point>
+        <point x="135" y="195"></point>
+        <point x="120" y="210"></point>
+        <point x="60" y="210"></point>
+        <point x="30" y="195"></point>
+        <point x="60" y="180"></point>
+        <point x="60" y="165"></point>
+        <point x="15" y="135"></point>
+        <point x="30" y="120"></point>
+        <point x="15" y="105"></point>
+        <point x="40" y="104"></point>
+        <point x="45" y="90"></point>
+        <point x="60" y="90"></point>
+        <point x="90" y="105"></point>
+        <point x="105" y="120"></point>
+        <point x="120" y="120"></point>
+        <point x="105" y="60"></point>
+        <point x="120" y="60"></point>
+        <point x="135" y="30"></point>
+        <point x="150" y="15"></point>
+        <point x="165" y="30"></point>
+        <point x="180" y="60"></point>
+        <point x="195" y="60"></point>
+        <point x="180" y="120"></point>
+        <point x="195" y="120"></point>
+        <point x="210" y="105"></point>
+        <point x="240" y="90"></point>
+        <point x="255" y="90"></point>
+        <point x="263" y="104"></point>
+        <point x="285" y="105"></point>
+        <point x="270" y="120"></point>
+        <point x="285" y="135"></point>
+        <point x="240" y="165"></point>
+        <point x="240" y="180"></point>
+        <point x="270" y="195"></point>
+        <point x="240" y="210"></point>
+        <point x="180" y="210"></point>
+        <point x="165" y="195"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="135" y="195"></point>
+        <point x="135" y="240"></point>
+        <point x="120" y="255"></point>
+        <point x="105" y="255"></point>
+        <point x="105" y="285"></point>
+        <point x="135" y="285"></point>
+        <point x="165" y="240"></point>
+        <point x="165" y="195"></point>
+      </polygon>
+    </shape>
+    <shape name="line" rotatable="true" editableColorIndex="0">
+      <line endX="150" startY="0" marked="true" color="-1920102913" endY="300" startX="150"></line>
+    </shape>
+    <shape name="line half" rotatable="true" editableColorIndex="0">
+      <line endX="150" startY="0" marked="true" color="-1920102913" endY="150" startX="150"></line>
+    </shape>
+    <shape name="pentagon" rotatable="false" editableColorIndex="0">
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="150" y="15"></point>
+        <point x="15" y="120"></point>
+        <point x="60" y="285"></point>
+        <point x="240" y="285"></point>
+        <point x="285" y="120"></point>
+      </polygon>
+    </shape>
+    <shape name="person" rotatable="false" editableColorIndex="0">
+      <circle x="110" y="5" marked="true" color="-1920102913" diameter="80" filled="true"></circle>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="105" y="90"></point>
+        <point x="120" y="195"></point>
+        <point x="90" y="285"></point>
+        <point x="105" y="300"></point>
+        <point x="135" y="300"></point>
+        <point x="150" y="225"></point>
+        <point x="165" y="300"></point>
+        <point x="195" y="300"></point>
+        <point x="210" y="285"></point>
+        <point x="180" y="195"></point>
+        <point x="195" y="90"></point>
+      </polygon>
+      <rectangle endX="172" startY="79" marked="true" color="-1920102913" endY="94" startX="127" filled="true"></rectangle>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="195" y="90"></point>
+        <point x="240" y="150"></point>
+        <point x="225" y="180"></point>
+        <point x="165" y="105"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="105" y="90"></point>
+        <point x="60" y="150"></point>
+        <point x="75" y="180"></point>
+        <point x="135" y="105"></point>
+      </polygon>
+    </shape>
+    <shape name="plant" rotatable="false" editableColorIndex="0">
+      <rectangle endX="165" startY="90" marked="true" color="-1920102913" endY="300" startX="135" filled="true"></rectangle>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="135" y="255"></point>
+        <point x="90" y="210"></point>
+        <point x="45" y="195"></point>
+        <point x="75" y="255"></point>
+        <point x="135" y="285"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="165" y="255"></point>
+        <point x="210" y="210"></point>
+        <point x="255" y="195"></point>
+        <point x="225" y="255"></point>
+        <point x="165" y="285"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="135" y="180"></point>
+        <point x="90" y="135"></point>
+        <point x="45" y="120"></point>
+        <point x="75" y="180"></point>
+        <point x="135" y="210"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="165" y="180"></point>
+        <point x="165" y="210"></point>
+        <point x="225" y="180"></point>
+        <point x="255" y="120"></point>
+        <point x="210" y="135"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="135" y="105"></point>
+        <point x="90" y="60"></point>
+        <point x="45" y="45"></point>
+        <point x="75" y="105"></point>
+        <point x="135" y="135"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="165" y="105"></point>
+        <point x="165" y="135"></point>
+        <point x="225" y="105"></point>
+        <point x="255" y="45"></point>
+        <point x="210" y="60"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="135" y="90"></point>
+        <point x="120" y="45"></point>
+        <point x="150" y="15"></point>
+        <point x="180" y="45"></point>
+        <point x="165" y="90"></point>
+      </polygon>
+    </shape>
+    <shape name="sheep" rotatable="false" editableColorIndex="15">
+      <circle x="203" y="65" marked="true" color="-1" diameter="88" filled="true"></circle>
+      <circle x="70" y="65" marked="true" color="-1" diameter="162" filled="true"></circle>
+      <circle x="150" y="105" marked="true" color="-1" diameter="120" filled="true"></circle>
+      <polygon color="-1920102913" filled="true" marked="false">
+        <point x="218" y="120"></point>
+        <point x="240" y="165"></point>
+        <point x="255" y="165"></point>
+        <point x="278" y="120"></point>
+      </polygon>
+      <circle x="214" y="72" marked="false" color="-1920102913" diameter="67" filled="true"></circle>
+      <rectangle endX="179" startY="223" marked="true" color="-1" endY="298" startX="164" filled="true"></rectangle>
+      <polygon color="-1" filled="true" marked="true">
+        <point x="45" y="285"></point>
+        <point x="30" y="285"></point>
+        <point x="30" y="240"></point>
+        <point x="15" y="195"></point>
+        <point x="45" y="210"></point>
+      </polygon>
+      <circle x="3" y="83" marked="true" color="-1" diameter="150" filled="true"></circle>
+      <rectangle endX="80" startY="221" marked="true" color="-1" endY="296" startX="65" filled="true"></rectangle>
+      <polygon color="-1" filled="true" marked="true">
+        <point x="195" y="285"></point>
+        <point x="210" y="285"></point>
+        <point x="210" y="240"></point>
+        <point x="240" y="210"></point>
+        <point x="195" y="210"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="false">
+        <point x="276" y="85"></point>
+        <point x="285" y="105"></point>
+        <point x="302" y="99"></point>
+        <point x="294" y="83"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="false">
+        <point x="219" y="85"></point>
+        <point x="210" y="105"></point>
+        <point x="193" y="99"></point>
+        <point x="201" y="83"></point>
+      </polygon>
+    </shape>
+    <shape name="square" rotatable="false" editableColorIndex="0">
+      <rectangle endX="270" startY="30" marked="true" color="-1920102913" endY="270" startX="30" filled="true"></rectangle>
+    </shape>
+    <shape name="square 2" rotatable="false" editableColorIndex="0">
+      <rectangle endX="270" startY="30" marked="true" color="-1920102913" endY="270" startX="30" filled="true"></rectangle>
+      <rectangle endX="240" startY="60" marked="false" color="255" endY="240" startX="60" filled="true"></rectangle>
+    </shape>
+    <shape name="star" rotatable="false" editableColorIndex="0">
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="151" y="1"></point>
+        <point x="185" y="108"></point>
+        <point x="298" y="108"></point>
+        <point x="207" y="175"></point>
+        <point x="242" y="282"></point>
+        <point x="151" y="216"></point>
+        <point x="59" y="282"></point>
+        <point x="94" y="175"></point>
+        <point x="3" y="108"></point>
+        <point x="116" y="108"></point>
+      </polygon>
+    </shape>
+    <shape name="target" rotatable="false" editableColorIndex="0">
+      <circle x="0" y="0" marked="true" color="-1920102913" diameter="300" filled="true"></circle>
+      <circle x="30" y="30" marked="false" color="255" diameter="240" filled="true"></circle>
+      <circle x="60" y="60" marked="true" color="-1920102913" diameter="180" filled="true"></circle>
+      <circle x="90" y="90" marked="false" color="255" diameter="120" filled="true"></circle>
+      <circle x="120" y="120" marked="true" color="-1920102913" diameter="60" filled="true"></circle>
+    </shape>
+    <shape name="tree" rotatable="false" editableColorIndex="0">
+      <circle x="118" y="3" marked="true" color="-1920102913" diameter="94" filled="true"></circle>
+      <rectangle endX="180" startY="195" marked="false" color="-1653716737" endY="300" startX="120" filled="true"></rectangle>
+      <circle x="65" y="21" marked="true" color="-1920102913" diameter="108" filled="true"></circle>
+      <circle x="116" y="41" marked="true" color="-1920102913" diameter="127" filled="true"></circle>
+      <circle x="45" y="90" marked="true" color="-1920102913" diameter="120" filled="true"></circle>
+      <circle x="104" y="74" marked="true" color="-1920102913" diameter="152" filled="true"></circle>
+    </shape>
+    <shape name="triangle" rotatable="false" editableColorIndex="0">
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="150" y="30"></point>
+        <point x="15" y="255"></point>
+        <point x="285" y="255"></point>
+      </polygon>
+    </shape>
+    <shape name="triangle 2" rotatable="false" editableColorIndex="0">
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="150" y="30"></point>
+        <point x="15" y="255"></point>
+        <point x="285" y="255"></point>
+      </polygon>
+      <polygon color="255" filled="true" marked="false">
+        <point x="151" y="99"></point>
+        <point x="225" y="223"></point>
+        <point x="75" y="224"></point>
+      </polygon>
+    </shape>
+    <shape name="truck" rotatable="false" editableColorIndex="0">
+      <rectangle endX="195" startY="45" marked="true" color="-1920102913" endY="187" startX="4" filled="true"></rectangle>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="296" y="193"></point>
+        <point x="296" y="150"></point>
+        <point x="259" y="134"></point>
+        <point x="244" y="104"></point>
+        <point x="208" y="104"></point>
+        <point x="207" y="194"></point>
+      </polygon>
+      <rectangle endX="195" startY="60" marked="false" color="-1" endY="105" startX="195" filled="true"></rectangle>
+      <polygon color="255" filled="true" marked="false">
+        <point x="238" y="112"></point>
+        <point x="252" y="141"></point>
+        <point x="219" y="141"></point>
+        <point x="218" y="112"></point>
+      </polygon>
+      <circle x="234" y="174" marked="false" color="255" diameter="42" filled="true"></circle>
+      <rectangle endX="214" startY="185" marked="true" color="-1920102913" endY="194" startX="181" filled="true"></rectangle>
+      <circle x="144" y="174" marked="false" color="255" diameter="42" filled="true"></circle>
+      <circle x="24" y="174" marked="false" color="255" diameter="42" filled="true"></circle>
+      <circle x="24" y="174" marked="true" color="-1920102913" diameter="42" filled="false"></circle>
+      <circle x="144" y="174" marked="true" color="-1920102913" diameter="42" filled="false"></circle>
+      <circle x="234" y="174" marked="true" color="-1920102913" diameter="42" filled="false"></circle>
+    </shape>
+    <shape name="turtle" rotatable="true" editableColorIndex="0">
+      <polygon color="1504722175" filled="true" marked="false">
+        <point x="215" y="204"></point>
+        <point x="240" y="233"></point>
+        <point x="246" y="254"></point>
+        <point x="228" y="266"></point>
+        <point x="215" y="252"></point>
+        <point x="193" y="210"></point>
+      </polygon>
+      <polygon color="1504722175" filled="true" marked="false">
+        <point x="195" y="90"></point>
+        <point x="225" y="75"></point>
+        <point x="245" y="75"></point>
+        <point x="260" y="89"></point>
+        <point x="269" y="108"></point>
+        <point x="261" y="124"></point>
+        <point x="240" y="105"></point>
+        <point x="225" y="105"></point>
+        <point x="210" y="105"></point>
+      </polygon>
+      <polygon color="1504722175" filled="true" marked="false">
+        <point x="105" y="90"></point>
+        <point x="75" y="75"></point>
+        <point x="55" y="75"></point>
+        <point x="40" y="89"></point>
+        <point x="31" y="108"></point>
+        <point x="39" y="124"></point>
+        <point x="60" y="105"></point>
+        <point x="75" y="105"></point>
+        <point x="90" y="105"></point>
+      </polygon>
+      <polygon color="1504722175" filled="true" marked="false">
+        <point x="132" y="85"></point>
+        <point x="134" y="64"></point>
+        <point x="107" y="51"></point>
+        <point x="108" y="17"></point>
+        <point x="150" y="2"></point>
+        <point x="192" y="18"></point>
+        <point x="192" y="52"></point>
+        <point x="169" y="65"></point>
+        <point x="172" y="87"></point>
+      </polygon>
+      <polygon color="1504722175" filled="true" marked="false">
+        <point x="85" y="204"></point>
+        <point x="60" y="233"></point>
+        <point x="54" y="254"></point>
+        <point x="72" y="266"></point>
+        <point x="85" y="252"></point>
+        <point x="107" y="210"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="119" y="75"></point>
+        <point x="179" y="75"></point>
+        <point x="209" y="101"></point>
+        <point x="224" y="135"></point>
+        <point x="220" y="225"></point>
+        <point x="175" y="261"></point>
+        <point x="128" y="261"></point>
+        <point x="81" y="224"></point>
+        <point x="74" y="135"></point>
+        <point x="88" y="99"></point>
+      </polygon>
+    </shape>
+    <shape name="wheel" rotatable="false" editableColorIndex="0">
+      <circle x="3" y="3" marked="true" color="-1920102913" diameter="294" filled="true"></circle>
+      <circle x="30" y="30" marked="false" color="255" diameter="240" filled="true"></circle>
+      <line endX="150" startY="285" marked="true" color="-1920102913" endY="15" startX="150"></line>
+      <line endX="285" startY="150" marked="true" color="-1920102913" endY="150" startX="15"></line>
+      <circle x="120" y="120" marked="true" color="-1920102913" diameter="60" filled="true"></circle>
+      <line endX="79" startY="40" marked="true" color="-1920102913" endY="269" startX="216"></line>
+      <line endX="269" startY="84" marked="true" color="-1920102913" endY="221" startX="40"></line>
+      <line endX="269" startY="216" marked="true" color="-1920102913" endY="79" startX="40"></line>
+      <line endX="221" startY="40" marked="true" color="-1920102913" endY="269" startX="84"></line>
+    </shape>
+    <shape name="wolf" rotatable="false" editableColorIndex="0">
+      <polygon color="255" filled="true" marked="false">
+        <point x="253" y="133"></point>
+        <point x="245" y="131"></point>
+        <point x="245" y="133"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="2" y="194"></point>
+        <point x="13" y="197"></point>
+        <point x="30" y="191"></point>
+        <point x="38" y="193"></point>
+        <point x="38" y="205"></point>
+        <point x="20" y="226"></point>
+        <point x="20" y="257"></point>
+        <point x="27" y="265"></point>
+        <point x="38" y="266"></point>
+        <point x="40" y="260"></point>
+        <point x="31" y="253"></point>
+        <point x="31" y="230"></point>
+        <point x="60" y="206"></point>
+        <point x="68" y="198"></point>
+        <point x="75" y="209"></point>
+        <point x="66" y="228"></point>
+        <point x="65" y="243"></point>
+        <point x="82" y="261"></point>
+        <point x="84" y="268"></point>
+        <point x="100" y="267"></point>
+        <point x="103" y="261"></point>
+        <point x="77" y="239"></point>
+        <point x="79" y="231"></point>
+        <point x="100" y="207"></point>
+        <point x="98" y="196"></point>
+        <point x="119" y="201"></point>
+        <point x="143" y="202"></point>
+        <point x="160" y="195"></point>
+        <point x="166" y="210"></point>
+        <point x="172" y="213"></point>
+        <point x="173" y="238"></point>
+        <point x="167" y="251"></point>
+        <point x="160" y="248"></point>
+        <point x="154" y="265"></point>
+        <point x="169" y="264"></point>
+        <point x="178" y="247"></point>
+        <point x="186" y="240"></point>
+        <point x="198" y="260"></point>
+        <point x="200" y="271"></point>
+        <point x="217" y="271"></point>
+        <point x="219" y="262"></point>
+        <point x="207" y="258"></point>
+        <point x="195" y="230"></point>
+        <point x="192" y="198"></point>
+        <point x="210" y="184"></point>
+        <point x="227" y="164"></point>
+        <point x="242" y="144"></point>
+        <point x="259" y="145"></point>
+        <point x="284" y="151"></point>
+        <point x="277" y="141"></point>
+        <point x="293" y="140"></point>
+        <point x="299" y="134"></point>
+        <point x="297" y="127"></point>
+        <point x="273" y="119"></point>
+        <point x="270" y="105"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="-1" y="195"></point>
+        <point x="14" y="180"></point>
+        <point x="36" y="166"></point>
+        <point x="40" y="153"></point>
+        <point x="53" y="140"></point>
+        <point x="82" y="131"></point>
+        <point x="134" y="133"></point>
+        <point x="159" y="126"></point>
+        <point x="188" y="115"></point>
+        <point x="227" y="108"></point>
+        <point x="236" y="102"></point>
+        <point x="238" y="98"></point>
+        <point x="268" y="86"></point>
+        <point x="269" y="92"></point>
+        <point x="281" y="87"></point>
+        <point x="269" y="103"></point>
+        <point x="269" y="113"></point>
+      </polygon>
+    </shape>
+    <shape name="x" rotatable="false" editableColorIndex="0">
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="270" y="75"></point>
+        <point x="225" y="30"></point>
+        <point x="30" y="225"></point>
+        <point x="75" y="270"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="30" y="75"></point>
+        <point x="75" y="30"></point>
+        <point x="270" y="225"></point>
+        <point x="225" y="270"></point>
+      </polygon>
+    </shape>
+  </turtleShapes>
+  <linkShapes>
+    <shape name="default" curviness="0.0">
+      <lines>
+        <line x="-0.2" visible="false">
+          <dash value="0.0"></dash>
+          <dash value="1.0"></dash>
+        </line>
+        <line x="0.0" visible="true">
+          <dash value="1.0"></dash>
+          <dash value="0.0"></dash>
+        </line>
+        <line x="0.2" visible="false">
+          <dash value="0.0"></dash>
+          <dash value="1.0"></dash>
+        </line>
+      </lines>
+      <indicator>
+        <shape name="link direction" rotatable="true" editableColorIndex="0">
+          <line endX="90" startY="150" marked="true" color="-1920102913" endY="180" startX="150"></line>
+          <line endX="210" startY="150" marked="true" color="-1920102913" endY="180" startX="150"></line>
+        </shape>
+      </indicator>
+    </shape>
+  </linkShapes>
+  <previewCommands>need-to-manually-make-preview-for-this-model</previewCommands>
+</model>
