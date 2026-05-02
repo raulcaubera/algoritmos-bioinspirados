@@ -66,23 +66,28 @@ particles-own [
 ; REPORTERS
 ; ----------------------------------------------------------
 to-report g-best-vars-text
-  if empty? g-best-vars [
+  let best-design best-design-now
+
+  if (not is-list? best-design) or empty? best-design [
     report "Sin inicializar"
   ]
 
   report (word
-    "A1=" precision (item 0 g-best-vars) 4 "\n"
-    "A2=" precision (item 1 g-best-vars) 4 "\n"
-    "A3=" precision (item 2 g-best-vars) 4 "\n"
-    "A4=" precision (item 3 g-best-vars) 4 "\n"
-    "A5=" precision (item 4 g-best-vars) 4 "\n"
-    "A6=" precision (item 5 g-best-vars) 4 "\n"
-    "A7=" precision (item 6 g-best-vars) 4
+    "A1=" precision (item 0 best-design) 4 "\n"
+    "A2=" precision (item 1 best-design) 4 "\n"
+    "A3=" precision (item 2 best-design) 4 "\n"
+    "A4=" precision (item 3 best-design) 4 "\n"
+    "A5=" precision (item 4 best-design) 4 "\n"
+    "A6=" precision (item 5 best-design) 4 "\n"
+    "A7=" precision (item 6 best-design) 4
   )
 end
 
+
+
+
 to-report g-best-val-text
-  report precision g-best-val 6
+  report precision best-val-now 6
 end
 
 to-report model-node-count
@@ -122,6 +127,86 @@ to-report unique-member-lengths
 end
 
 
+to-report element-consistent-mass-3d [area node-i node-j]
+  let elem-length distance-between-nodes node-i node-j
+  let coeff (effective-density * area * elem-length / 6)
+
+  report (list
+    (list (2 * coeff) 0 0 coeff 0 0)
+    (list 0 (2 * coeff) 0 0 coeff 0)
+    (list 0 0 (2 * coeff) 0 0 coeff)
+
+    (list coeff 0 0 (2 * coeff) 0 0)
+    (list 0 coeff 0 0 (2 * coeff) 0)
+    (list 0 0 coeff 0 0 (2 * coeff))
+  )
+end
+
+to-report copy-design [design]
+  if (not is-list? design) or (length design != 7) [
+    report []
+  ]
+
+  report (list
+    (item 0 design)
+    (item 1 design)
+    (item 2 design)
+    (item 3 design)
+    (item 4 design)
+    (item 5 design)
+    (item 6 design)
+  )
+end
+
+to-report live-best-vars
+  if not any? particles [
+    report []
+  ]
+
+  let best-particle min-one-of particles [p-best-val]
+  let best-design [p-best-vars] of best-particle
+
+  if (not is-list? best-design) or (length best-design != 7) [
+    report []
+  ]
+
+  report (list
+    (item 0 best-design)
+    (item 1 best-design)
+    (item 2 best-design)
+    (item 3 best-design)
+    (item 4 best-design)
+    (item 5 best-design)
+    (item 6 best-design)
+  )
+end
+
+to-report live-best-val
+  if not any? particles [
+    report 1.0E+20
+  ]
+
+  let best-particle min-one-of particles [p-best-val]
+  report [p-best-val] of best-particle
+end
+
+
+to sync-global-best
+  set g-best-vars live-best-vars
+  set g-best-val live-best-val
+end
+
+
+to-report best-design-now
+  report live-best-vars
+end
+
+to-report best-val-now
+  report live-best-val
+end
+
+
+
 ; ----------------------------------------------------------
 ; SETUP
 ; ----------------------------------------------------------
@@ -129,12 +214,16 @@ to setup
   clear-all
   reset-ticks
 
+  set g-best-vars []
+  set g-best-val 1.0E+20
+
   setup-design-space
   build-120bar-model
 
   initialize-particles
-  initialize-global-best
+  sync-global-best
 end
+
 
 
 ; ----------------------------------------------------------
@@ -172,15 +261,16 @@ end
 ; ----------------------------------------------------------
 ; INICIALIZACIÓN DE PARTÍCULAS
 ; ----------------------------------------------------------
+
 to initialize-particles
   create-particles population-size [
     set vars random-design
     set vel random-normal-vector number-of-groups 0.5
 
     set current-val evaluate-design vars
-    set p-best-vars vars
+    set p-best-vars copy-design vars
     set p-best-val current-val
-
+    
     ;; visualmente ya no importa el espacio 2D real
     ;; las tortugas solo actúan como contenedores/agentes
     hide-turtle
@@ -625,13 +715,13 @@ to-report assemble-global-stiffness [design]
   report global-k
 end
 
-;; masa global lummped (vector diagonal)
-to-report assemble-global-lumped-mass [design]
+;; masa global lummped (matriz diagonal)
+to-report assemble-global-mass [design]
   let member-areas expand-design-to-members design
-  let global-m zero-vector total-dofs
+  let global-m zero-matrix total-dofs total-dofs
 
   ;; ----------------------------------------
-  ;; 1) masa estructural lumped de las barras
+  ;; 1) masa estructural consistente de barras
   ;; ----------------------------------------
   let elem-index 0
   while [elem-index < length member-connectivity] [
@@ -639,26 +729,24 @@ to-report assemble-global-lumped-mass [design]
     let node-i first elem-conn
     let node-j last elem-conn
 
-    let area item elem-index member-areas
-    let elem-length item elem-index member-lengths
-    let elem-mass (effective-density * area * elem-length)
+    let area-value item elem-index member-areas
+    let elem-m element-consistent-mass-3d area-value node-i node-j
+    let elem-dofs element-dof-indices node-i node-j
 
-    let nodal-share (elem-mass / 2)
+    let local-row 0
+    while [local-row < 6] [
+      let global-row item local-row elem-dofs
 
-    let dofs-i node-dof-indices node-i
-    let dofs-j node-dof-indices node-j
+      let local-col 0
+      while [local-col < 6] [
+        let global-col item local-col elem-dofs
+        let m-value item local-col (item local-row elem-m)
 
-    ;; la masa puntual en nodo se aplica a sus 3 DOFs traslacionales
-    let ii 0
-    while [ii < 3] [
-      set global-m vector-add-at global-m (item ii dofs-i) nodal-share
-      set ii ii + 1
-    ]
+        set global-m matrix-add global-m global-row global-col m-value
+        set local-col local-col + 1
+      ]
 
-    let jj 0
-    while [jj < 3] [
-      set global-m vector-add-at global-m (item jj dofs-j) nodal-share
-      set jj jj + 1
+      set local-row local-row + 1
     ]
 
     set elem-index elem-index + 1
@@ -666,13 +754,15 @@ to-report assemble-global-lumped-mass [design]
 
   ;; ----------------------------------------
   ;; 2) masas no estructurales nodales
+  ;; (se añaden en la diagonal de los DOFs traslacionales)
   ;; ----------------------------------------
 
   ;; ápice
   let apex-dofs node-dof-indices apex-node-id
   let ia 0
   while [ia < 3] [
-    set global-m vector-add-at global-m (item ia apex-dofs) apex-extra-mass
+    let dof-index item ia apex-dofs
+    set global-m matrix-add global-m dof-index dof-index apex-extra-mass
     set ia ia + 1
   ]
 
@@ -684,7 +774,8 @@ to-report assemble-global-lumped-mass [design]
 
     let k 0
     while [k < 3] [
-      set global-m vector-add-at global-m (item k dofs) upper-ring-extra-mass
+      let dof-index item k dofs
+      set global-m matrix-add global-m dof-index dof-index upper-ring-extra-mass
       set k k + 1
     ]
 
@@ -699,7 +790,8 @@ to-report assemble-global-lumped-mass [design]
 
     let k 0
     while [k < 3] [
-      set global-m vector-add-at global-m (item k dofs) mid-ring-extra-mass
+      let dof-index item k dofs
+      set global-m matrix-add global-m dof-index dof-index mid-ring-extra-mass
       set k k + 1
     ]
 
@@ -710,34 +802,118 @@ to-report assemble-global-lumped-mass [design]
 end
 
 
-;; pasar probvlema modal a generalizado estandar
-to-report generalized-to-standard-matrix [reduced-k reduced-m]
-  let n length reduced-m
-  let result zero-matrix n n
+;;.......
+to-report matrix-transpose [mat]
+  let rows length mat
+  let cols length first mat
+  let result zero-matrix cols rows
 
   let row-index 0
-  while [row-index < n] [
-    let mass-i item row-index reduced-m
-
+  while [row-index < rows] [
     let col-index 0
-    while [col-index < n] [
-      let mass-j item col-index reduced-m
-      let kij item col-index (item row-index reduced-k)
-
-      let value 0
-      if (mass-i > 0) and (mass-j > 0) [
-        set value (kij / sqrt (mass-i * mass-j))
-      ]
-
-      set result matrix-set result row-index col-index value
+    while [col-index < cols] [
+      let val item col-index (item row-index mat)
+      set result matrix-set result col-index row-index val
       set col-index col-index + 1
     ]
-
     set row-index row-index + 1
   ]
 
   report result
 end
+
+;;...............
+to-report cholesky-decomposition [mat]
+  let n length mat
+  let lower-tri zero-matrix n n
+
+  let row-index 0
+  while [row-index < n] [
+    let col-index 0
+    while [col-index <= row-index] [
+      let sum-value 0
+      let k 0
+      while [k < col-index] [
+        set sum-value sum-value +
+          ((item k (item row-index lower-tri)) * (item k (item col-index lower-tri)))
+        set k k + 1
+      ]
+
+      if row-index = col-index [
+        let diag-value ((item col-index (item row-index mat)) - sum-value)
+        if diag-value <= 0 [
+          report nobody
+        ]
+        set lower-tri matrix-set lower-tri row-index col-index sqrt diag-value
+      ]
+
+      if row-index > col-index [
+        let lij (((item col-index (item row-index mat)) - sum-value) /
+                 (item col-index (item col-index lower-tri)))
+        set lower-tri matrix-set lower-tri row-index col-index lij
+      ]
+
+      set col-index col-index + 1
+    ]
+    set row-index row-index + 1
+  ]
+
+  report lower-tri
+end
+
+
+;;...............
+to-report solve-lower-left [lower-mat rhs-mat]
+  let n length lower-mat
+  let ncols length first rhs-mat
+  let solution-mat zero-matrix n ncols
+
+  let col-index 0
+  while [col-index < ncols] [
+    let row-index 0
+    while [row-index < n] [
+      let rhs-value item col-index (item row-index rhs-mat)
+
+      let k 0
+      while [k < row-index] [
+        set rhs-value rhs-value -
+          ((item k (item row-index lower-mat)) * (item col-index (item k solution-mat)))
+        set k k + 1
+      ]
+
+      let x-value (rhs-value / (item row-index (item row-index lower-mat)))
+      set solution-mat matrix-set solution-mat row-index col-index x-value
+
+      set row-index row-index + 1
+    ]
+
+    set col-index col-index + 1
+  ]
+
+  report solution-mat
+end
+
+
+;; pasar probvlema modal a generalizado estandar
+to-report generalized-to-standard-matrix-full [reduced-k reduced-m]
+  let lower-chol cholesky-decomposition reduced-m
+
+  if lower-chol = nobody [
+    report nobody
+  ]
+
+  ;; temp = L^{-1} K
+  let temp-mat solve-lower-left lower-chol reduced-k
+
+  ;; A = temp * L^{-T}
+  ;; equivalente a: A = transpose( L^{-1} * transpose(temp) )
+  let standard-a matrix-transpose (solve-lower-left lower-chol (matrix-transpose temp-mat))
+
+  report standard-a
+end
+
+
+
 
 
 ; ----------------------------------------------------------
@@ -854,20 +1030,20 @@ end
 ;;Cálculo de las dos primeras frecuencias naturales
 ;;.............
 
-to-report first-two-natural-frequencies [design]
+to-report first-two-natural-frequencies-with-rotations [design jacobi-rotations]
   let global-k assemble-global-stiffness design
-  let global-m assemble-global-lumped-mass design
+  let global-m assemble-global-mass design
 
   let reduced-k submatrix-by-indices global-k free-dofs
-  let reduced-m subvector-by-indices global-m free-dofs
+  let reduced-m submatrix-by-indices global-m free-dofs
 
-  let standard-a generalized-to-standard-matrix reduced-k reduced-m
+  let standard-a generalized-to-standard-matrix-full reduced-k reduced-m
 
-  ;; OJO:
-  ;; 80 era demasiado poco para una matriz 111x111.
-  ;; Aquí usamos muchas más rotaciones Jacobi.
-  let eigvals jacobi-eigenvalues standard-a 1.0e-10 12000
+  if standard-a = nobody [
+    report (list 0 0)
+  ]
 
+  let eigvals jacobi-eigenvalues standard-a 1.0e-10 jacobi-rotations
   let positive-eigvals sort (filter [lam -> lam > 1.0e-10] eigvals)
 
   if length positive-eigvals < 2 [
@@ -882,6 +1058,14 @@ to-report first-two-natural-frequencies [design]
 
   report (list frequency-1 frequency-2)
 end
+
+to-report first-two-natural-frequencies [design]
+  report first-two-natural-frequencies-with-rotations design 12000
+end
+
+
+
+
 
 ;; peso real del domo
 to-report compute-real-weight [design]
@@ -939,12 +1123,28 @@ end
 ; ----------------------------------------------------------
 ; MEJOR GLOBAL INICIAL
 ; ----------------------------------------------------------
+
 to initialize-global-best
-  ask min-one-of particles [p-best-val] [
-    set g-best-vars p-best-vars
-    set g-best-val p-best-val
-  ]
+  sync-global-best
 end
+
+
+to recompute-global-best
+  if not any? particles [
+    set g-best-vars []
+    set g-best-val 1.0E+20
+    stop
+  ]
+
+  let best-particle min-one-of particles [p-best-val]
+  let best-design [p-best-vars] of best-particle
+  let best-value [p-best-val] of best-particle
+
+  set g-best-vars copy-design best-design
+  set g-best-val best-value
+end
+
+
 
 ; ----------------------------------------------------------
 ; GENERAR UN DISEÑO ALEATORIO DENTRO DE LÍMITES
@@ -962,17 +1162,23 @@ to update-personal-global-best
 
     if current-val < p-best-val [
       set p-best-val current-val
-      set p-best-vars vars
+      set p-best-vars (list
+        (item 0 vars)
+        (item 1 vars)
+        (item 2 vars)
+        (item 3 vars)
+        (item 4 vars)
+        (item 5 vars)
+        (item 6 vars)
+      )
     ]
   ]
 
-  ask min-one-of particles [p-best-val] [
-    if p-best-val < g-best-val [
-      set g-best-val p-best-val
-      set g-best-vars p-best-vars
-    ]
-  ]
+  sync-global-best
 end
+
+
+
 
 ; ==========================================================
 ; BUCLE PRINCIPAL — CSA VECTORIAL
@@ -983,6 +1189,11 @@ to go
 
   ;; 1) Actualizar mejores con posiciones actuales
   update-personal-global-best
+  let best-design best-design-now
+
+  if (not is-list? best-design) or empty? best-design [
+    stop
+  ]
 
   ;; 2) μ(t): decaimiento lineal exploración → explotación
   let tau (ticks / max-iterations)
@@ -1016,7 +1227,7 @@ to go
       ]
       [
         ;; Movimiento normalizado hacia mejor global
-        let d (vec-sub g-best-vars vars)
+        let d (vec-sub best-design vars)
         let nd vec-norm d
 
         if nd > 0 [
@@ -1038,7 +1249,7 @@ to go
     let r2 random-float 1.0
 
     let term1 (vec-scale r1 (vec-sub p-best-vars vars))
-    let term2 (vec-scale r2 (vec-sub g-best-vars vars))
+    let term2 (vec-scale r2 (vec-sub best-design vars))
     let acc (vec-scale (attraction-to-global-best / 2) (vec-add term1 term2))
 
     set vel (vec-add (vec-scale particle-inertia vel) acc)
@@ -1210,34 +1421,34 @@ to print-120bar-problem-parameters
   show "=============================================="
 end
 
-
 to print-current-best-design
   show "=============================================="
   show "MEJOR DISENO ACTUAL"
   show "=============================================="
 
-  if empty? g-best-vars [
-    show "g-best-vars aun no esta inicializado"
+  let best-design best-design-now
+  let best-value best-val-now
+
+  if (not is-list? best-design) or empty? best-design [
+    show "No hay mejor diseño disponible"
     stop
   ]
 
   show (word
-    "A1=" precision (item 0 g-best-vars) 4
-    "  A2=" precision (item 1 g-best-vars) 4
-    "  A3=" precision (item 2 g-best-vars) 4
-    "  A4=" precision (item 3 g-best-vars) 4
-    "  A5=" precision (item 4 g-best-vars) 4
-    "  A6=" precision (item 5 g-best-vars) 4
-    "  A7=" precision (item 6 g-best-vars) 4
+    "A1=" precision (item 0 best-design) 4
+    "  A2=" precision (item 1 best-design) 4
+    "  A3=" precision (item 2 best-design) 4
+    "  A4=" precision (item 3 best-design) 4
+    "  A5=" precision (item 4 best-design) 4
+    "  A6=" precision (item 5 best-design) 4
+    "  A7=" precision (item 6 best-design) 4
   )
 
-  show (word "fitness actual = " precision g-best-val 6)
-  show (word "peso real = " precision (compute-real-weight g-best-vars) 6 " kg")
+  show (word "fitness actual = " precision best-value 6)
+  show (word "peso real = " precision (compute-real-weight best-design) 6 " kg")
 
   show "=============================================="
 end
-
-
 
 to print-120bar-startup-check
   print-120bar-problem-parameters
@@ -1255,14 +1466,16 @@ to print-frequencies-for-design [design]
   show "=============================================="
 end
 
-
 to print-current-best-dynamic-status
-  if empty? g-best-vars [
-    show "g-best-vars aun no esta inicializado"
+  let best-design best-design-now
+  let best-value best-val-now
+
+  if (not is-list? best-design) or empty? best-design [
+    show "No hay mejor diseño disponible"
     stop
   ]
 
-  let freqs first-two-natural-frequencies g-best-vars
+  let freqs first-two-natural-frequencies best-design
   let frequency-1 item 0 freqs
   let frequency-2 item 1 freqs
 
@@ -1282,8 +1495,8 @@ to print-current-best-dynamic-status
   show (word "f1 minima = " precision min-frequency-1 6 " Hz")
   show (word "f2 minima = " precision min-frequency-2 6 " Hz")
   show (word "violacion total = " precision violation 6)
-  show (word "peso real = " precision (compute-real-weight g-best-vars) 6 " kg")
-  show (word "fitness penalizado = " precision (evaluate-design-120 g-best-vars) 6)
+  show (word "peso real = " precision (compute-real-weight best-design) 6 " kg")
+  show (word "fitness penalizado = " precision (evaluate-design-120 best-design) 6)
   show "=============================================="
 end
 
@@ -1363,20 +1576,144 @@ to print-group-length-breakdown
   show "=============================================="
 end
 
+
+to print-jacobi-rotation-study [design]
+  let rotation-list [2000 5000 12000 20000 40000]
+
+  show "=============================================="
+  show "ESTUDIO DE CONVERGENCIA DE JACOBI"
+  show "=============================================="
+
+  foreach rotation-list [nrot ->
+    let freqs first-two-natural-frequencies-with-rotations design nrot
+    show (word
+      "rotaciones = " nrot
+      " | f1 = " precision (item 0 freqs) 6 " Hz"
+      " | f2 = " precision (item 1 freqs) 6 " Hz"
+    )
+  ]
+
+  show "=============================================="
+end
+
+to regression-test-120bar-benchmark
+  let benchmark-design [19.8527 40.0162 11.4790 21.5800 10.1424 12.5263 15.0054]
+
+  let benchmark-weight compute-real-weight benchmark-design
+  let benchmark-freqs first-two-natural-frequencies benchmark-design
+  let benchmark-f1 item 0 benchmark-freqs
+  let benchmark-f2 item 1 benchmark-freqs
+
+  show "=============================================="
+  show "REGRESION BENCHMARK 120-BAR"
+  show "=============================================="
+  show (word "peso = " precision benchmark-weight 6 " kg")
+  show (word "f1 = " precision benchmark-f1 6 " Hz")
+  show (word "f2 = " precision benchmark-f2 6 " Hz")
+  show "=============================================="
+end
+
+to debug-global-best-clean
+  show "=============================================="
+  show "DEBUG GLOBAL BEST LIMPIO"
+  show "=============================================="
+
+  show (list "any? particles =" any? particles)
+  show (list "count particles =" count particles)
+
+  show (list "g-best-vars raw =" g-best-vars)
+  show (list "g-best-val raw =" g-best-val)
+
+  show (list "live-best-vars =" live-best-vars)
+  show (list "live-best-val =" live-best-val)
+
+  if any? particles [
+    let best-particle min-one-of particles [p-best-val]
+    show (list "best particle who =" [who] of best-particle)
+    show (list "best particle p-best-val =" [p-best-val] of best-particle)
+    show (list "best particle p-best-vars =" [p-best-vars] of best-particle)
+  ]
+
+  show "=============================================="
+end
+
+
+to debug-global-best-after-setup
+  show "=============================================="
+  show "DEBUG GLOBAL BEST"
+  show "=============================================="
+  show (word "any? particles = " any? particles)
+  show (word "count particles = " count particles)
+  show (word "g-best-vars = " g-best-vars)
+  show (word "g-best-val = " g-best-val)
+
+  if any? particles [
+    let best-particle min-one-of particles [p-best-val]
+    show (word "best particle who = " [who] of best-particle)
+    show (word "best particle p-best-val = " [p-best-val] of best-particle)
+    show (word "best particle p-best-vars = " [p-best-vars] of best-particle)
+  ]
+
+  show "=============================================="
+end
+
+
+to print-feasibility-status
+  let best-design best-design-now
+  let best-value best-val-now
+
+  if (not is-list? best-design) or empty? best-design [
+    show "No hay mejor diseño disponible"
+    stop
+  ]
+
+  let freqs first-two-natural-frequencies best-design
+  let frequency-1 item 0 freqs
+  let frequency-2 item 1 freqs
+
+  let violation 0
+  if frequency-1 < min-frequency-1 [
+    set violation violation + ((min-frequency-1 - frequency-1) / min-frequency-1)
+  ]
+  if frequency-2 < min-frequency-2 [
+    set violation violation + ((min-frequency-2 - frequency-2) / min-frequency-2)
+  ]
+
+  ifelse violation = 0
+  [
+    show (word
+      "FACTIBLE | peso = " precision (compute-real-weight best-design) 6
+      " kg | f1 = " precision frequency-1 6
+      " | f2 = " precision frequency-2 6
+      " | fitness = " precision best-value 6
+    )
+  ]
+  [
+    show (word
+      "NO FACTIBLE | viol = " precision violation 6
+      " | peso = " precision (compute-real-weight best-design) 6
+      " kg | f1 = " precision frequency-1 6
+      " | f2 = " precision frequency-2 6
+      " | fitness = " precision best-value 6
+    )
+  ]
+end
+
+
 ]]></code>
   <widgets>
     <view3d wrappingAllowedZ="true" x="0" wrappingAllowedX="true" y="0" minPycor="-20" height="255" showTickCounter="true" patchSize="6.0" fontSize="10" wrappingAllowedY="true" width="254" tickCounterLabel="ticks" maxPycor="20" updateMode="1" frameRate="30.0" maxPzcor="20" maxPxcor="20" minPxcor="-20" minPzcor="0"></view3d>
     <button x="241" y="65" height="47" disableUntilTicks="false" forever="false" kind="Observer" width="102" sizeVersion="0">setup</button>
     <button x="240" y="174" height="44" disableUntilTicks="false" forever="true" kind="Observer" width="103" sizeVersion="0">go</button>
     <button x="241" y="120" height="46" disableUntilTicks="false" forever="false" kind="Observer" display="step" width="102" sizeVersion="0">go</button>
-    <slider x="381" step="1" y="30" max="100" display="population-size" height="33" min="1" direction="Horizontal" default="20.0" variable="population-size" width="174" sizeVersion="0"></slider>
+    <slider x="381" step="1" y="30" max="100" display="population-size" height="33" min="1" direction="Horizontal" default="4.0" variable="population-size" width="174" sizeVersion="0"></slider>
     <slider x="381" step="0.1" y="75" max="5.0" display="mu-max" height="33" min="0.1" direction="Horizontal" default="1.0" variable="mu-max" width="174" sizeVersion="0"></slider>
-    <slider x="381" step="0.01" y="115" max="1.0" display="mu-min" height="33" min="0.01" direction="Horizontal" default="0.1" variable="mu-min" width="174" sizeVersion="0"></slider>
-    <slider x="381" step="0.05" y="155" max="1.0" display="Pp" height="33" min="0.0" direction="Horizontal" default="0.1" variable="Pp" width="174" sizeVersion="0"></slider>
-    <slider x="381" step="10" y="195" max="1000" display="max-iterations" height="33" min="10" direction="Horizontal" default="500.0" variable="max-iterations" width="174" sizeVersion="0"></slider>
-    <slider x="381" step="0.05" y="235" max="1.0" display="particle-inertia" height="33" min="0.0" direction="Horizontal" default="0.7" variable="particle-inertia" width="174" sizeVersion="0"></slider>
-    <slider x="381" step="0.1" y="315" max="3.0" display="attraction-to-global-best" height="33" min="0.0" direction="Horizontal" default="1.5" variable="attraction-to-global-best" width="202" sizeVersion="0"></slider>
-    <slider x="381" step="0.5" y="355" max="10.0" display="particle-speed-limit" height="33" min="0.5" direction="Horizontal" default="3.0" variable="particle-speed-limit" width="174" sizeVersion="0"></slider>
+    <slider x="381" step="0.01" y="115" max="1.0" display="mu-min" height="33" min="0.01" direction="Horizontal" default="0.05" variable="mu-min" width="174" sizeVersion="0"></slider>
+    <slider x="381" step="0.05" y="155" max="1.0" display="Pp" height="33" min="0.0" direction="Horizontal" default="0.25" variable="Pp" width="174" sizeVersion="0"></slider>
+    <slider x="381" step="10" y="195" max="1000" display="max-iterations" height="33" min="10" direction="Horizontal" default="100.0" variable="max-iterations" width="174" sizeVersion="0"></slider>
+    <slider x="381" step="0.05" y="235" max="1.0" display="particle-inertia" height="33" min="0.0" direction="Horizontal" default="0.5" variable="particle-inertia" width="174" sizeVersion="0"></slider>
+    <slider x="381" step="0.1" y="315" max="3.0" display="attraction-to-global-best" height="33" min="0.0" direction="Horizontal" default="0.6" variable="attraction-to-global-best" width="202" sizeVersion="0"></slider>
+    <slider x="381" step="0.5" y="355" max="10.0" display="particle-speed-limit" height="33" min="0.5" direction="Horizontal" default="1.0" variable="particle-speed-limit" width="174" sizeVersion="0"></slider>
     <plot x="18" autoPlotX="true" yMax="10.0" autoPlotY="true" yAxis="fitness" y="306" xMin="0.0" height="200" legend="true" xMax="10.0" yMin="0.0" xAxis="iteración" display="Convergencia" width="342" sizeVersion="0">
       <setup></setup>
       <update></update>
