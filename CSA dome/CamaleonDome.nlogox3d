@@ -51,6 +51,14 @@ globals [
   mid-ring-node-ids
   outer-ring-node-ids
 
+  ;; parámetros CSA paper-faithful
+  csa-c1
+  csa-c2
+  csa-gamma
+  
+  ;; penalización estática para el domo
+  penalty-lambda
+
 ]
 
 particles-own [
@@ -66,29 +74,85 @@ particles-own [
 ; REPORTERS
 ; ----------------------------------------------------------
 to-report g-best-vars-text
-  let best-design best-design-now
-
-  if (not is-list? best-design) or empty? best-design [
+  if (not is-list? g-best-vars) or empty? g-best-vars [
     report "Sin inicializar"
   ]
 
   report (word
-    "A1=" precision (item 0 best-design) 4 "\n"
-    "A2=" precision (item 1 best-design) 4 "\n"
-    "A3=" precision (item 2 best-design) 4 "\n"
-    "A4=" precision (item 3 best-design) 4 "\n"
-    "A5=" precision (item 4 best-design) 4 "\n"
-    "A6=" precision (item 5 best-design) 4 "\n"
-    "A7=" precision (item 6 best-design) 4
+    "A1=" precision (item 0 g-best-vars) 4 "\n"
+    "A2=" precision (item 1 g-best-vars) 4 "\n"
+    "A3=" precision (item 2 g-best-vars) 4 "\n"
+    "A4=" precision (item 3 g-best-vars) 4 "\n"
+    "A5=" precision (item 4 g-best-vars) 4 "\n"
+    "A6=" precision (item 5 g-best-vars) 4 "\n"
+    "A7=" precision (item 6 g-best-vars) 4
   )
 end
 
-
-
-
 to-report g-best-val-text
-  report precision best-val-now 6
+  report precision g-best-val 6
 end
+
+
+; ==========================================================
+; EVALUACIÓN DE LA SOLUCIÓN
+; ==========================================================
+
+
+to-report first-two-natural-frequencies-fast [design]
+  report first-two-natural-frequencies-with-rotations design 3000
+end
+
+to-report first-two-natural-frequencies-accurate [design]
+  report first-two-natural-frequencies-with-rotations design 12000
+end
+
+to-report evaluate-design-120-fast [design]
+  let weight compute-real-weight design
+  let freqs first-two-natural-frequencies-fast design
+
+  let frequency-1 item 0 freqs
+  let frequency-2 item 1 freqs
+
+  let v1 max list 0 ((min-frequency-1 - frequency-1) / min-frequency-1)
+  let v2 max list 0 ((min-frequency-2 - frequency-2) / min-frequency-2)
+
+  let penalty (penalty-lambda * (v1 + v2))
+
+  report weight + penalty
+end
+
+to-report evaluate-design-120-accurate [design]
+  let weight compute-real-weight design
+  let freqs first-two-natural-frequencies-accurate design
+
+  let frequency-1 item 0 freqs
+  let frequency-2 item 1 freqs
+
+  let v1 max list 0 ((min-frequency-1 - frequency-1) / min-frequency-1)
+  let v2 max list 0 ((min-frequency-2 - frequency-2) / min-frequency-2)
+
+  let penalty (penalty-lambda * (v1 + v2))
+
+  report weight + penalty
+end
+
+to-report evaluate-design [design]
+  report evaluate-design-120-fast design
+end
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 to-report model-node-count
   report length node-coords
@@ -114,6 +178,11 @@ to-report model-free-dofs-count
   report length free-dofs
 end
 
+
+
+
+
+
 to-report unique-member-lengths
   let rounded []
   let i 0
@@ -125,6 +194,8 @@ to-report unique-member-lengths
 
   report remove-duplicates sort rounded
 end
+
+
 
 
 to-report element-consistent-mass-3d [area node-i node-j]
@@ -142,6 +213,32 @@ to-report element-consistent-mass-3d [area node-i node-j]
   )
 end
 
+
+
+; ----------------------------------------------------------
+; SETUP
+; ----------------------------------------------------------
+
+to setup
+  clear-all
+  reset-ticks
+
+  set g-best-vars []
+  set g-best-val 1.0E+20
+
+  setup-design-space
+  build-120bar-model
+  initialize-particles
+  update-personal-global-best
+end
+
+
+
+; ==========================================================
+; UTILIDADES VECTORIALES
+; ==========================================================
+
+
 to-report copy-design [design]
   if (not is-list? design) or (length design != 7) [
     report []
@@ -158,70 +255,67 @@ to-report copy-design [design]
   )
 end
 
-to-report live-best-vars
-  if not any? particles [
-    report []
-  ]
-
-  let best-particle min-one-of particles [p-best-val]
-  let best-design [p-best-vars] of best-particle
-
-  if (not is-list? best-design) or (length best-design != 7) [
-    report []
-  ]
-
-  report (list
-    (item 0 best-design)
-    (item 1 best-design)
-    (item 2 best-design)
-    (item 3 best-design)
-    (item 4 best-design)
-    (item 5 best-design)
-    (item 6 best-design)
-  )
+;;Ceros: vector y matriz
+to-report zero-vector [n]
+  report n-values n [ i -> 0 ]
 end
 
-to-report live-best-val
-  if not any? particles [
-    report 1.0E+20
-  ]
+to-report zero-matrix [rows cols]
+  report n-values rows [ r -> n-values cols [ c -> 0 ] ]
+end
 
-  let best-particle min-one-of particles [p-best-val]
-  report [p-best-val] of best-particle
+;;Reemplazar un valor en una matriz
+to-report matrix-set [mat row-index col-index new-value]
+  let selected-row item row-index mat
+  let updated-row replace-item col-index selected-row new-value
+  report replace-item row-index mat updated-row
 end
 
 
-to sync-global-best
-  set g-best-vars live-best-vars
-  set g-best-val live-best-val
+;;Sumar a una posición concreta de la matriz
+to-report matrix-add [mat row-index col-index increment]
+  let current-value item col-index (item row-index mat)
+  report matrix-set mat row-index col-index (current-value + increment)
 end
 
-
-to-report best-design-now
-  report live-best-vars
+to-report vec-add [a b]
+  report (map [[x y] -> x + y] a b)
 end
 
-to-report best-val-now
-  report live-best-val
+to-report vec-sub [a b]
+  report (map [[x y] -> x - y] a b)
 end
 
+to-report vec-scale [s a]
+  report (map [x -> s * x] a)
+end
 
+to-report vec-norm [a]
+  report sqrt (sum (map [x -> x * x] a))
+end
 
-; ----------------------------------------------------------
-; SETUP
-; ----------------------------------------------------------
-to setup
-  clear-all
-  reset-ticks
+to-report vec-clip [a low high]
+  report (map [[x lo hi] -> max list lo (min list x hi)] a low high)
+end
 
-  set g-best-vars []
-  set g-best-val 1.0E+20
+to-report vec-limit-components [a lim]
+  report (map [x -> max list (- lim) (min list x lim)] a)
+end
 
-  setup-design-space
-  build-120bar-model
+to-report random-vector-between [low high]
+  report (map [[lo hi] -> lo + random-float (hi - lo)] low high)
+end
 
-  initialize-particles
-  sync-global-best
+to-report random-normal-vector [n sigma]
+  report n-values n [ -> random-normal 0 sigma ]
+end
+
+to-report random-uniform-vector [n]
+  report n-values n [ -> (random-float 2 - 1) ]
+end
+
+to-report vec-hadamard [a b]
+  report (map [[x y] -> x * y] a b)
 end
 
 
@@ -229,6 +323,7 @@ end
 ; ----------------------------------------------------------
 ; ESPACIO DE DISEÑO DEL PROBLEMA
 ; ----------------------------------------------------------
+
 to setup-design-space
   ;; 7 grupos del domo de 120 barras
   set number-of-groups 7
@@ -255,27 +350,30 @@ to setup-design-space
   set apex-extra-mass       (3000 * nonstructural-mass-factor)
   set upper-ring-extra-mass (500  * nonstructural-mass-factor)
   set mid-ring-extra-mass   (100  * nonstructural-mass-factor)
+
+  ;; ==========================================
+  ;; CSA paper-faithful (ingeniería)
+  ;; ==========================================
+  set csa-Pp 0.15
+  set csa-p1 0.85
+  set csa-p2 0.85
+  set csa-c1 1.75
+  set csa-c2 1.75
+  set csa-gamma 1.0
+  set csa-alpha 3.5
+  set csa-beta 3.0
+  
+  set penalty-lambda 100000
+  
 end
 
-
 ; ----------------------------------------------------------
-; INICIALIZACIÓN DE PARTÍCULAS
+; GENERAR UN DISEÑO ALEATORIO DENTRO DE LÍMITES
 ; ----------------------------------------------------------
-
-to initialize-particles
-  create-particles population-size [
-    set vars random-design
-    set vel random-normal-vector number-of-groups 0.5
-
-    set current-val evaluate-design vars
-    set p-best-vars copy-design vars
-    set p-best-val current-val
-    
-    ;; visualmente ya no importa el espacio 2D real
-    ;; las tortugas solo actúan como contenedores/agentes
-    hide-turtle
-  ]
+to-report random-design
+  report random-vector-between lower-bounds upper-bounds
 end
+
 
 
 
@@ -467,10 +565,6 @@ to build-120bar-member-lengths
   ]
 end
 
-
-
-
-
 to-report node-xyz [node-id]
   report item (node-id - 1) node-coords
 end
@@ -486,7 +580,6 @@ to-report distance-between-nodes [ni nj]
 
   report sqrt (delta-x * delta-x + delta-y * delta-y + delta-z * delta-z)
 end
-
 
 to-report node-dof-indices [node-id]
   let base (3 * (node-id - 1))
@@ -507,7 +600,6 @@ to-report build-restrained-dofs
   report result
 end
 
-
 to-report build-free-dofs
   let result []
   let d 0
@@ -525,7 +617,6 @@ end
 to-report element-dof-indices [node-i node-j]
   report sentence (node-dof-indices node-i) (node-dof-indices node-j)
 end
-
 
 
 ;;Expansión del diseño de 7 variables a 120 barras reales
@@ -556,35 +647,8 @@ end
 
 
 
-
-
-
-
-
-
   
-;;Ceros: vector y matriz
-to-report zero-vector [n]
-  report n-values n [ i -> 0 ]
-end
 
-to-report zero-matrix [rows cols]
-  report n-values rows [ r -> n-values cols [ c -> 0 ] ]
-end
-
-;;Reemplazar un valor en una matriz
-to-report matrix-set [mat row-index col-index new-value]
-  let selected-row item row-index mat
-  let updated-row replace-item col-index selected-row new-value
-  report replace-item row-index mat updated-row
-end
-
-
-;;Sumar a una posición concreta de la matriz
-to-report matrix-add [mat row-index col-index increment]
-  let current-value item col-index (item row-index mat)
-  report matrix-set mat row-index col-index (current-value + increment)
-end
 
 
 ;;Extraer un subvector por índices
@@ -913,9 +977,6 @@ to-report generalized-to-standard-matrix-full [reduced-k reduced-m]
 end
 
 
-
-
-
 ; ----------------------------------------------------------
 ; UTILIDADES PARA JACOBI
 ; ----------------------------------------------------------
@@ -1025,7 +1086,6 @@ to-report jacobi-eigenvalues [input-matrix tolerance max-rotations]
 end
 
 
-
 ;;-----------
 ;;Cálculo de las dos primeras frecuencias naturales
 ;;.............
@@ -1059,12 +1119,11 @@ to-report first-two-natural-frequencies-with-rotations [design jacobi-rotations]
   report (list frequency-1 frequency-2)
 end
 
+
+
 to-report first-two-natural-frequencies [design]
-  report first-two-natural-frequencies-with-rotations design 12000
+  report first-two-natural-frequencies-accurate design
 end
-
-
-
 
 
 ;; peso real del domo
@@ -1085,247 +1144,283 @@ to-report compute-real-weight [design]
 end
 
 
-; ----------------------------------------------------------
-; FITNESS
-; ----------------------------------------------------------
-to-report evaluate-design-120 [design]
-  let weight compute-real-weight design
 
-  let freqs first-two-natural-frequencies design
-  let frequency-1 item 0 freqs
-  let frequency-2 item 1 freqs
 
-  let violation 0
 
-  if frequency-1 < min-frequency-1 [
-    set violation violation + ((min-frequency-1 - frequency-1) / min-frequency-1)
+
+;;-----------------------------
+;; FUNCIONES CSA
+;;-----------------------------
+
+
+to-report mu-paper [iter-num max-iter]
+  let ratio (iter-num / max-iter)
+  report (csa-gamma * exp ( - ((csa-alpha * ratio) ^ csa-beta) ))
+end
+
+to-report omega-paper [iter-num max-iter]
+  report (1 - (iter-num / max-iter))
+end
+
+to-report accel-paper [iter-num]
+  let a (2590 * (1 - (1 / (iter-num + 1))))
+  if a < 1 [
+    set a 1
+  ]
+  report a
+end
+
+to-report csa-search-step [x pbest gbest iter-num max-iter]
+  let mu mu-paper iter-num max-iter
+  let result []
+  let j 0
+
+  while [j < length x] [
+    let xj item j x
+    let pj item j pbest
+    let gj item j gbest
+    let lj item j lower-bounds
+    let uj item j upper-bounds
+
+    let r1 random-float 1.0
+    let r2 random-float 1.0
+    let r3 random-float 1.0
+    let ri random-float 1.0
+
+    let sign-dir 1
+    if (random-float 1.0) < 0.5 [ set sign-dir -1 ]
+
+    let new-xj xj
+
+    ifelse (ri >= csa-Pp)
+    [
+      ;; Eq. (3), primer estado
+      set new-xj (xj + (csa-p1 * (pj - gj) * r2) + (csa-p2 * (gj - xj) * r1))
+    ]
+    [
+      ;; Eq. (3), segundo estado
+      set new-xj (xj + mu * (uj - lj) * r3 * sign-dir)
+    ]
+
+    ;; forzar límites
+    if new-xj < lj [ set new-xj lj ]
+    if new-xj > uj [ set new-xj uj ]
+
+    set result lput new-xj result
+    set j j + 1
   ]
 
-  if frequency-2 < min-frequency-2 [
-    set violation violation + ((min-frequency-2 - frequency-2) / min-frequency-2)
-  ]
-
-  let progress 0
-  if max-iterations > 0 [
-    set progress (ticks / max-iterations)
-  ]
-  if progress > 1 [ set progress 1 ]
-
-  let penalty-exponent (1.5 + 1.5 * progress)
-
-  report ((1 + violation) ^ penalty-exponent) * weight
+  report result
 end
 
 
+to-report csa-eye-rotation-step [x-old x-search]
+  let d length x-old
+  if d < 2 [ report x-search ]
 
+  ;; elegir dos dimensiones distintas
+  let i random d
+  let j random d
+  while [j = i] [
+    set j random d
+  ]
 
+  ;; ángulo theta = r * sgn(rand-0.5) * 180 grados
+  let r random-float 1.0
+  let sign-dir 1
+  if (random-float 1.0) < 0.5 [ set sign-dir -1 ]
+  let theta (r * sign-dir * 180)
 
-; ----------------------------------------------------------
-; MEJOR GLOBAL INICIAL
-; ----------------------------------------------------------
+  ;; vector centrado respecto a la posición actual
+  let yc vec-sub x-search x-old
 
-to initialize-global-best
-  sync-global-best
+  let yi item i yc
+  let yj item j yc
+
+  ;; rotación plana
+  let new-yi ((yi * cos theta) - (yj * sin theta))
+  let new-yj ((yi * sin theta) + (yj * cos theta))
+
+  let yc-rot replace-item i yc new-yi
+  set yc-rot replace-item j yc-rot new-yj
+
+  let rotated vec-add x-old yc-rot
+
+  report vec-clip rotated lower-bounds upper-bounds
 end
 
 
-to recompute-global-best
-  if not any? particles [
-    set g-best-vars []
-    set g-best-val 1.0E+20
+to-report csa-tongue-step [x-current pbest gbest old-vel iter-num max-iter]
+  let omega omega-paper iter-num max-iter
+  let a accel-paper iter-num
+
+  let new-pos []
+  let new-vel []
+
+  let j 0
+  while [j < length x-current] [
+    let xj item j x-current
+    let pj item j pbest
+    let gj item j gbest
+    let v-old item j old-vel
+
+    let r1 random-float 1.0
+    let r2 random-float 1.0
+
+    ;; Eq. (18)
+    let v-new ((omega * v-old) +
+               (csa-c1 * (gj - xj) * r1) +
+               (csa-c2 * (pj - xj) * r2))
+
+    ;; Eq. (20)
+    let x-new (xj + (((v-new * v-new) - (v-old * v-old)) / (2 * a)))
+
+    let lj item j lower-bounds
+    let uj item j upper-bounds
+
+    if x-new < lj [ set x-new lj ]
+    if x-new > uj [ set x-new uj ]
+
+    set new-pos lput x-new new-pos
+    set new-vel lput v-new new-vel
+
+    set j j + 1
+  ]
+
+  report (list new-pos new-vel)
+end
+
+
+to csa-greedy-move [candidate-vars candidate-fast-val candidate-vel]
+  let current-weight compute-real-weight vars
+  let candidate-weight compute-real-weight candidate-vars
+
+  ;; si la actual ya es factible y el candidato pesa igual o más, no merece validar
+  if (abs (current-val - current-weight) < 1.0e-9) and (candidate-weight >= current-weight) [
     stop
   ]
 
-  let best-particle min-one-of particles [p-best-val]
-  let best-design [p-best-vars] of best-particle
-  let best-value [p-best-val] of best-particle
+  ;; si la evaluación rápida no parece mejorar, no validamos preciso
+  if candidate-fast-val < current-val [
+    let candidate-accurate-val evaluate-design-120-accurate candidate-vars
 
-  set g-best-vars copy-design best-design
-  set g-best-val best-value
+    if candidate-accurate-val < current-val [
+      set vars candidate-vars
+      set current-val candidate-accurate-val
+      set vel candidate-vel
+    ]
+  ]
+end
+
+;; INICIALIZACION DE LAS PARTICULAS
+
+to initialize-particles
+  create-particles population-size [
+    set vars random-design
+    set vel zero-vector number-of-groups
+
+    set current-val evaluate-design-120-accurate vars
+    set p-best-vars copy-design vars
+    set p-best-val current-val
+
+    hide-turtle
+  ]
 end
 
 
-
-; ----------------------------------------------------------
-; GENERAR UN DISEÑO ALEATORIO DENTRO DE LÍMITES
-; ----------------------------------------------------------
-to-report random-design
-  report random-vector-between lower-bounds upper-bounds
-end
-
-; ----------------------------------------------------------
 ; ACTUALIZAR MEJORES PERSONALES Y GLOBAL
-; ----------------------------------------------------------
+
 to update-personal-global-best
   ask particles [
-    set current-val evaluate-design vars
-
     if current-val < p-best-val [
       set p-best-val current-val
-      set p-best-vars (list
-        (item 0 vars)
-        (item 1 vars)
-        (item 2 vars)
-        (item 3 vars)
-        (item 4 vars)
-        (item 5 vars)
-        (item 6 vars)
-      )
+      set p-best-vars copy-design vars
     ]
   ]
 
-  sync-global-best
+  if any? particles [
+    let best-particle min-one-of particles [p-best-val]
+    set g-best-vars copy-design ([p-best-vars] of best-particle)
+    set g-best-val [p-best-val] of best-particle
+  ]
 end
-
-
 
 
 ; ==========================================================
 ; BUCLE PRINCIPAL — CSA VECTORIAL
 ; ==========================================================
+
 to go
-  ;; si quieres parar en un máximo de iteraciones:
+  
   if ticks >= max-iterations [ stop ]
 
-  ;; 1) Actualizar mejores con posiciones actuales
+  ;; asegurar global best actual
   update-personal-global-best
-  let best-design best-design-now
 
-  if (not is-list? best-design) or empty? best-design [
-    stop
-  ]
+  let iter-num (ticks + 1)
+  let max-iter max-iterations
 
-  ;; 2) μ(t): decaimiento lineal exploración → explotación
-  let tau (ticks / max-iterations)
-  if tau > 1 [ set tau 1 ]
-  let mu (mu-max - (mu-max - mu-min) * tau)
-
-  ;; 3) CSA por partícula: Percepción → Rotación → Caza
   ask particles [
+    let x0 copy-design vars
+    let old-vel vel
 
-    ;; ── Fase 1: Percepción / Búsqueda ─────────────────────
-    ;; Con prob. Pp → exploración aleatoria
-    ;; Con prob. 1-Pp → paso hacia p-best o g-best
-    ifelse (random-float 1.0 < Pp)
-    [
-      let rand-dir random-uniform-vector number-of-groups
-      let step (vec-scale (mu * attraction-to-personal-best) rand-dir)
+    ;; --------------------------------------------------
+    ;; Paso 1: búsqueda / percepción (Eq. 3)
+    ;; --------------------------------------------------
+    let x1 csa-search-step x0 p-best-vars g-best-vars iter-num max-iter
+    let f1 evaluate-design x1
+    csa-greedy-move x1 f1 old-vel
 
-      set vars (vec-clip (vec-add vars step) lower-bounds upper-bounds)
-    ]
-    [
-      ifelse (random-float 1.0 < 0.5)
-      [
-        ;; Movimiento normalizado hacia mejor personal
-        let d (vec-sub p-best-vars vars)
-        let nd vec-norm d
+    let x-after-search vars
 
-        if nd > 0 [
-          let step (vec-scale (mu * attraction-to-personal-best / nd) d)
-          set vars (vec-clip (vec-add vars step) lower-bounds upper-bounds)
-        ]
-      ]
-      [
-        ;; Movimiento normalizado hacia mejor global
-        let d (vec-sub best-design vars)
-        let nd vec-norm d
+    ;; --------------------------------------------------
+    ;; Paso 2: rotación de ojos (Eq. 11)
+    ;; --------------------------------------------------
+    let x2 csa-eye-rotation-step x0 x-after-search
+    let f2 evaluate-design x2
+    csa-greedy-move x2 f2 old-vel
 
-        if nd > 0 [
-          let step (vec-scale (mu * attraction-to-personal-best / nd) d)
-          set vars (vec-clip (vec-add vars step) lower-bounds upper-bounds)
-        ]
-      ]
-    ]
+    let x-after-eye vars
 
-    ;; ── Fase 2: Rotación ocular / perturbación local ──────
-    ;; En N dimensiones lo modelamos como una perturbación aleatoria suave
-    let eye-step (mu * 0.5 * (0.5 + random-float 0.5))
-    let noise (vec-scale eye-step (random-uniform-vector number-of-groups))
-
-    set vars (vec-clip (vec-add vars noise) lower-bounds upper-bounds)
-
-    ;; ── Fase 3: Caza / proyección de lengua ───────────────
-    let r1 random-float 1.0
-    let r2 random-float 1.0
-
-    let term1 (vec-scale r1 (vec-sub p-best-vars vars))
-    let term2 (vec-scale r2 (vec-sub best-design vars))
-    let acc (vec-scale (attraction-to-global-best / 2) (vec-add term1 term2))
-
-    set vel (vec-add (vec-scale particle-inertia vel) acc)
-
-    ;; Limitar velocidad por componente
-    set vel (vec-limit-components vel particle-speed-limit)
-
-    ;; Aplicar movimiento
-    set vars (vec-clip (vec-add vars vel) lower-bounds upper-bounds)
+    ;; --------------------------------------------------
+    ;; Paso 3: ataque con la lengua (Eq. 18 + Eq. 20)
+    ;; --------------------------------------------------
+    let tongue-output csa-tongue-step x-after-eye p-best-vars g-best-vars old-vel iter-num max-iter
+    let x3 item 0 tongue-output
+    let v3 item 1 tongue-output
+    let f3 evaluate-design x3
+    csa-greedy-move x3 f3 v3
   ]
 
-  update-plots
+  ;; actualizar mejores personales y globales al final del tick
+  update-personal-global-best
+
+  if ticks mod 20 = 0 [
+    update-plots
+  ]
+
   tick
 end
 
-; ==========================================================
-; EVALUACIÓN DE LA SOLUCIÓN
-; ==========================================================
-
-to-report evaluate-design [design]
-  report evaluate-design-120 design
-end
-
-
-; ==========================================================
-; UTILIDADES VECTORIALES
-; ==========================================================
-
-to-report vec-add [a b]
-  report (map [[x y] -> x + y] a b)
-end
-
-to-report vec-sub [a b]
-  report (map [[x y] -> x - y] a b)
-end
-
-to-report vec-scale [s a]
-  report (map [x -> s * x] a)
-end
-
-to-report vec-norm [a]
-  report sqrt (sum (map [x -> x * x] a))
-end
-
-to-report vec-clip [a low high]
-  report (map [[x lo hi] -> max list lo (min list x hi)] a low high)
-end
-
-to-report vec-limit-components [a lim]
-  report (map [x -> max list (- lim) (min list x lim)] a)
-end
-
-to-report random-vector-between [low high]
-  report (map [[lo hi] -> lo + random-float (hi - lo)] low high)
-end
-
-to-report random-normal-vector [n sigma]
-  report n-values n [ -> random-normal 0 sigma ]
-end
-
-to-report random-uniform-vector [n]
-  report n-values n [ -> (random-float 2 - 1) ]
-end
 
 
 
-
-
-
-
-
-
-
+;;-.-----------------------
+;; debug
+;;-.-----------------------
 ;; control
+;;-.-----------------------
 
-
+to trace-csa [n]
+  let k 0
+  while [k < n] [
+    go
+    show (word "tick = " ticks)
+    show (word "g-best-val = " precision g-best-val 6)
+    show (word "g-best-vars = " g-best-vars)
+    set k k + 1
+  ]
+end
 
 to print-120bar-model-summary
   show "=============================================="
@@ -1426,26 +1521,23 @@ to print-current-best-design
   show "MEJOR DISENO ACTUAL"
   show "=============================================="
 
-  let best-design best-design-now
-  let best-value best-val-now
-
-  if (not is-list? best-design) or empty? best-design [
+  if (not is-list? g-best-vars) or empty? g-best-vars [
     show "No hay mejor diseño disponible"
     stop
   ]
 
   show (word
-    "A1=" precision (item 0 best-design) 4
-    "  A2=" precision (item 1 best-design) 4
-    "  A3=" precision (item 2 best-design) 4
-    "  A4=" precision (item 3 best-design) 4
-    "  A5=" precision (item 4 best-design) 4
-    "  A6=" precision (item 5 best-design) 4
-    "  A7=" precision (item 6 best-design) 4
+    "A1=" precision (item 0 g-best-vars) 4
+    "  A2=" precision (item 1 g-best-vars) 4
+    "  A3=" precision (item 2 g-best-vars) 4
+    "  A4=" precision (item 3 g-best-vars) 4
+    "  A5=" precision (item 4 g-best-vars) 4
+    "  A6=" precision (item 5 g-best-vars) 4
+    "  A7=" precision (item 6 g-best-vars) 4
   )
 
-  show (word "fitness actual = " precision best-value 6)
-  show (word "peso real = " precision (compute-real-weight best-design) 6 " kg")
+  show (word "fitness actual = " precision g-best-val 6)
+  show (word "peso real = " precision (compute-real-weight g-best-vars) 6 " kg")
 
   show "=============================================="
 end
@@ -1467,15 +1559,15 @@ to print-frequencies-for-design [design]
 end
 
 to print-current-best-dynamic-status
-  let best-design best-design-now
-  let best-value best-val-now
+  let best-design g-best-vars
+  let best-value g-best-val
 
   if (not is-list? best-design) or empty? best-design [
     show "No hay mejor diseño disponible"
     stop
   ]
 
-  let freqs first-two-natural-frequencies best-design
+  let freqs first-two-natural-frequencies-accurate best-design
   let frequency-1 item 0 freqs
   let frequency-2 item 1 freqs
 
@@ -1496,7 +1588,7 @@ to print-current-best-dynamic-status
   show (word "f2 minima = " precision min-frequency-2 6 " Hz")
   show (word "violacion total = " precision violation 6)
   show (word "peso real = " precision (compute-real-weight best-design) 6 " kg")
-  show (word "fitness penalizado = " precision (evaluate-design-120 best-design) 6)
+  show (word "fitness penalizado = " precision (evaluate-design-120-accurate best-design) 6)
   show "=============================================="
 end
 
@@ -1613,91 +1705,14 @@ to regression-test-120bar-benchmark
   show "=============================================="
 end
 
-to debug-global-best-clean
-  show "=============================================="
-  show "DEBUG GLOBAL BEST LIMPIO"
-  show "=============================================="
-
-  show (list "any? particles =" any? particles)
-  show (list "count particles =" count particles)
-
-  show (list "g-best-vars raw =" g-best-vars)
-  show (list "g-best-val raw =" g-best-val)
-
-  show (list "live-best-vars =" live-best-vars)
-  show (list "live-best-val =" live-best-val)
-
-  if any? particles [
-    let best-particle min-one-of particles [p-best-val]
-    show (list "best particle who =" [who] of best-particle)
-    show (list "best particle p-best-val =" [p-best-val] of best-particle)
-    show (list "best particle p-best-vars =" [p-best-vars] of best-particle)
-  ]
-
-  show "=============================================="
-end
 
 
-to debug-global-best-after-setup
-  show "=============================================="
-  show "DEBUG GLOBAL BEST"
-  show "=============================================="
-  show (word "any? particles = " any? particles)
-  show (word "count particles = " count particles)
-  show (word "g-best-vars = " g-best-vars)
-  show (word "g-best-val = " g-best-val)
-
-  if any? particles [
-    let best-particle min-one-of particles [p-best-val]
-    show (word "best particle who = " [who] of best-particle)
-    show (word "best particle p-best-val = " [p-best-val] of best-particle)
-    show (word "best particle p-best-vars = " [p-best-vars] of best-particle)
-  ]
-
-  show "=============================================="
-end
 
 
-to print-feasibility-status
-  let best-design best-design-now
-  let best-value best-val-now
 
-  if (not is-list? best-design) or empty? best-design [
-    show "No hay mejor diseño disponible"
-    stop
-  ]
 
-  let freqs first-two-natural-frequencies best-design
-  let frequency-1 item 0 freqs
-  let frequency-2 item 1 freqs
 
-  let violation 0
-  if frequency-1 < min-frequency-1 [
-    set violation violation + ((min-frequency-1 - frequency-1) / min-frequency-1)
-  ]
-  if frequency-2 < min-frequency-2 [
-    set violation violation + ((min-frequency-2 - frequency-2) / min-frequency-2)
-  ]
 
-  ifelse violation = 0
-  [
-    show (word
-      "FACTIBLE | peso = " precision (compute-real-weight best-design) 6
-      " kg | f1 = " precision frequency-1 6
-      " | f2 = " precision frequency-2 6
-      " | fitness = " precision best-value 6
-    )
-  ]
-  [
-    show (word
-      "NO FACTIBLE | viol = " precision violation 6
-      " | peso = " precision (compute-real-weight best-design) 6
-      " kg | f1 = " precision frequency-1 6
-      " | f2 = " precision frequency-2 6
-      " | fitness = " precision best-value 6
-    )
-  ]
-end
 
 
 ]]></code>
@@ -1706,37 +1721,28 @@ end
     <button x="241" y="65" height="47" disableUntilTicks="false" forever="false" kind="Observer" width="102" sizeVersion="0">setup</button>
     <button x="240" y="174" height="44" disableUntilTicks="false" forever="true" kind="Observer" width="103" sizeVersion="0">go</button>
     <button x="241" y="120" height="46" disableUntilTicks="false" forever="false" kind="Observer" display="step" width="102" sizeVersion="0">go</button>
-    <slider x="381" step="1" y="30" max="100" display="population-size" height="33" min="1" direction="Horizontal" default="4.0" variable="population-size" width="174" sizeVersion="0"></slider>
-    <slider x="381" step="0.1" y="75" max="5.0" display="mu-max" height="33" min="0.1" direction="Horizontal" default="1.0" variable="mu-max" width="174" sizeVersion="0"></slider>
-    <slider x="381" step="0.01" y="115" max="1.0" display="mu-min" height="33" min="0.01" direction="Horizontal" default="0.05" variable="mu-min" width="174" sizeVersion="0"></slider>
-    <slider x="381" step="0.05" y="155" max="1.0" display="Pp" height="33" min="0.0" direction="Horizontal" default="0.25" variable="Pp" width="174" sizeVersion="0"></slider>
-    <slider x="381" step="10" y="195" max="1000" display="max-iterations" height="33" min="10" direction="Horizontal" default="100.0" variable="max-iterations" width="174" sizeVersion="0"></slider>
-    <slider x="381" step="0.05" y="235" max="1.0" display="particle-inertia" height="33" min="0.0" direction="Horizontal" default="0.5" variable="particle-inertia" width="174" sizeVersion="0"></slider>
-    <slider x="381" step="0.1" y="315" max="3.0" display="attraction-to-global-best" height="33" min="0.0" direction="Horizontal" default="0.6" variable="attraction-to-global-best" width="202" sizeVersion="0"></slider>
-    <slider x="381" step="0.5" y="355" max="10.0" display="particle-speed-limit" height="33" min="0.5" direction="Horizontal" default="1.0" variable="particle-speed-limit" width="174" sizeVersion="0"></slider>
+    <slider x="381" step="1" y="30" max="100" display="population-size" height="33" min="1" direction="Horizontal" default="8.0" variable="population-size" width="174" sizeVersion="0"></slider>
     <plot x="18" autoPlotX="true" yMax="10.0" autoPlotY="true" yAxis="fitness" y="306" xMin="0.0" height="200" legend="true" xMax="10.0" yMin="0.0" xAxis="iteración" display="Convergencia" width="342" sizeVersion="0">
       <setup></setup>
       <update></update>
-      <pen interval="1.0" mode="0" display="media" color="-10899396" legend="true">
-        <setup></setup>
-        <update>plot mean [current-val] of particles</update>
-      </pen>
       <pen interval="1.0" mode="0" display="mejor" color="-2674135" legend="true">
         <setup></setup>
         <update>plot g-best-val</update>
       </pen>
-      <pen interval="1.0" mode="0" display="peor" color="-13791810" legend="true">
-        <setup></setup>
-        <update>plot max [current-val] of particles</update>
-      </pen>
     </plot>
-    <slider x="381" step="0.1" y="277" max="3.0" display="attraction-to-personal-best" height="33" min="0.0" direction="Horizontal" default="1.0" variable="attraction-to-personal-best" width="203" sizeVersion="0"></slider>
     <monitor x="379" precision="2" y="400" height="92" fontSize="11" width="509" display="g-best-vars-text">g-best-vars-text</monitor>
-    <monitor x="595" precision="5" y="327" height="60" fontSize="11" width="100" display="g-best-val">g-best-val</monitor>
     <slider x="10" step="0.01" y="24" max="1.30" width="210" display="young-modulus-factor" height="51" min="0.70" direction="Horizontal" default="1.0" variable="young-modulus-factor"></slider>
     <slider x="8" step="0.01" y="89" max="1.30" width="210" display="density-factor" height="51" min="0.70" direction="Horizontal" default="1.0" variable="density-factor"></slider>
     <slider x="6" step="0.01" y="152" max="1.50" width="210" display="nonstructural-mass-factor" height="51" min="0.50" direction="Horizontal" default="1.0" variable="nonstructural-mass-factor"></slider>
     <slider x="8" step="0.01" y="215" max="1.25" width="210" display="frequency-target-factor" height="51" min="0.80" direction="Horizontal" default="1.0" variable="frequency-target-factor"></slider>
+    <slider x="381" step="10" y="73" max="1000" display="max-iterations" height="33" min="10" direction="Horizontal" default="200.0" variable="max-iterations" width="174" sizeVersion="0"></slider>
+    <monitor x="242" precision="17" y="241" height="60" fontSize="11" display="Iteracion" width="100" sizeVersion="0">ticks</monitor>
+    <slider x="398" step="0.05" y="151" max="1.0" display="csa-Pp" height="33" min="0.0" direction="Horizontal" default="0.1" variable="csa-Pp" width="174" sizeVersion="0"></slider>
+    <slider x="397" step="0.05" y="233" max="2.0" display="csa-p2" height="33" min="0.05" direction="Horizontal" default="0.85" variable="csa-p2" width="174" sizeVersion="0"></slider>
+    <slider x="397" step="0.05" y="193" max="2.0" display="csa-p1" height="33" min="0.05" direction="Horizontal" default="0.01" variable="csa-p1" width="174" sizeVersion="0"></slider>
+    <slider x="397" step="0.5" y="315" max="5" display="csa-beta" height="33" min="0.5" direction="Horizontal" default="3.0" variable="csa-beta" width="174" sizeVersion="0"></slider>
+    <slider x="397" step="0.5" y="273" max="5" display="csa-alpha" height="33" min="0.5" direction="Horizontal" default="3.5" variable="csa-alpha" width="174" sizeVersion="0"></slider>
+    <monitor x="614" precision="5" y="316" height="60" fontSize="11" width="100" display="g-best-val">g-best-val</monitor>
   </widgets>
   <info>## ¿QUÉ ES ESTO?
 
