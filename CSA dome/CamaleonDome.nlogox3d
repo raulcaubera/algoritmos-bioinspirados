@@ -58,6 +58,16 @@ globals [
   
   ;; penalización estática para el domo
   penalty-lambda
+  
+  ;; métricas cacheadas para la interfaz
+  ui-best-weight
+  ui-best-f1
+  ui-best-f2
+  ui-best-violation
+  ui-best-feasible
+  ui-best-margin-f1
+  ui-best-margin-f2
+
 
 ]
 
@@ -67,15 +77,20 @@ particles-own [
   p-best-vars         ;; mejor solución personal
   p-best-val          ;; mejor fitness personal
   current-val         ;; fitness actual
+  current-weight      ;; peso actual
 ]
 
 
 
+; ==========================================================
+; SETUP E INICIALIZACION
+; Construccion del problema, inicializacion de particulas
+; y siembra del mejor diseño global inicial.
+; ==========================================================
 
-; ----------------------------------------------------------
-; SETUP
-; ----------------------------------------------------------
 
+;; Inicializa el modelo completo: limpia el estado previo, 
+;; configura el problema, construye el domo, crea las partículas 
 to setup
   clear-all
   reset-ticks
@@ -86,19 +101,48 @@ to setup
   setup-design-space
   build-120bar-model
   initialize-particles
+  seed-global-best
   update-personal-global-best
+  update-ui-metrics
 end
 
-; ----------------------------------------------------------
+
+;; Calcula el mejor diseño global inicial a partir del mejor valor actual
+;; de las partículas recién inicializadas.
+to seed-global-best
+  if not any? particles [
+    set g-best-vars []
+    set g-best-val 1.0E+20
+    stop
+  ]
+
+  let best-particle min-one-of particles [current-val]
+  let best-design [vars] of best-particle
+
+  if (is-list? best-design) and (length best-design = number-of-groups) [
+    set g-best-vars (list
+      (item 0 best-design)
+      (item 1 best-design)
+      (item 2 best-design)
+      (item 3 best-design)
+      (item 4 best-design)
+      (item 5 best-design)
+      (item 6 best-design)
+    )
+  ]
+
+  set g-best-val [current-val] of best-particle
+end
+
+
 ; ESPACIO DE DISEÑO DEL PROBLEMA
-; ----------------------------------------------------------
 
- ;; Parámetros CSA:
-  ;; - p1 y p2: influencia del mejor personal y global en la fase de búsqueda
-  ;; - c1 y c2: coeficientes de la fase de lengua
-  ;; - alpha y beta: controlan la forma de μ(t)
-  ;; - Pp: probabilidad de usar la rama guiada por presa
 
+;; Configura el dominio del problema:
+;; - limites de las 7 variables de diseño
+;; - propiedades fisicas efectivas
+;; - masas nodales no estructurales
+;; - constantes fijas del CSA y penalizacion (c1 y c2: coeficientes de la fase de lengua; alpha y beta: controlan la forma de μ(t))
 to setup-design-space
   ;; 7 grupos del domo de 120 barras
   set number-of-groups 7
@@ -137,21 +181,22 @@ to setup-design-space
 end
 
 
-; ----------------------------------------------------------
-; GENERAR UN DISEÑO ALEATORIO DENTRO DE LÍMITES
-; ----------------------------------------------------------
+;; Genera un diseño aleatorio uniforme dentro de los limites del problema.
 to-report random-design
   report random-vector-between lower-bounds upper-bounds
 end
 
-; ----------------------------------------------------------
-; INICIALIZACION DE LAS PARTICULAS
-; ----------------------------------------------------------
+
+
+;; Crea la población inicial de partículas.
+;; Cada partícula comienza con un diseño aleatorio,
+;; velocidad nula y mejor personal igual a su estado inicial.
 to initialize-particles
   create-particles population-size [
     set vars random-design
     set vel zero-vector number-of-groups
-
+    
+    set current-weight compute-real-weight vars
     set current-val evaluate-design-120-accurate vars
     set p-best-vars copy-design vars
     set p-best-val current-val
@@ -160,10 +205,10 @@ to initialize-particles
   ]
 end
 
-; ----------------------------------------------------------
-; ACTUALIZAR MEJORES PERSONALES Y GLOBAL
-; ----------------------------------------------------------
 
+
+;; Actualiza los mejores personales de las partículas y
+;; recalcula el mejor diseño global del enjambre.
 to update-personal-global-best
   ask particles [
     if current-val < p-best-val [
@@ -174,25 +219,47 @@ to update-personal-global-best
 
   if any? particles [
     let best-particle min-one-of particles [p-best-val]
-    set g-best-vars copy-design ([p-best-vars] of best-particle)
+    let best-design [p-best-vars] of best-particle
+
+    if (is-list? best-design) and (length best-design = 7) [
+      set g-best-vars (list
+        (item 0 best-design)
+        (item 1 best-design)
+        (item 2 best-design)
+        (item 3 best-design)
+        (item 4 best-design)
+        (item 5 best-design)
+        (item 6 best-design)
+      )
+    ]
+
     set g-best-val [p-best-val] of best-particle
   ]
 end
 
 
+
 ; ==========================================================
-; EVALUACIÓN DE LA SOLUCIÓN
+; EVALUACION Y FITNESS
+; Funciones que calculan peso, frecuencias y fitness penalizado.
 ; ==========================================================
 
 
+
+;; Calcula las dos primeras frecuencias usando una evaluacion rapida
+;; con menos iteraciones de Jacobi para filtrar candidatos
 to-report first-two-natural-frequencies-fast [design]
   report first-two-natural-frequencies-with-rotations design 3000
 end
 
+;; Calcula las dos primeras frecuencias usando una evaluacion precisa
+;; para confirmar si una mejora es realmente valida.
 to-report first-two-natural-frequencies-accurate [design]
-  report first-two-natural-frequencies-with-rotations design 12000
+  report first-two-natural-frequencies-with-rotations design 20000
 end
 
+;; Evalua rapidamente un diseño:
+;; peso real + penalizacion por violacion de frecuencias.
 to-report evaluate-design-120-fast [design]
   let weight compute-real-weight design
   let freqs first-two-natural-frequencies-fast design
@@ -208,6 +275,8 @@ to-report evaluate-design-120-fast [design]
   report weight + penalty
 end
 
+;; Evalua de forma precisa un diseño:
+;; peso real + penalizacion por violacion de frecuencias.
 to-report evaluate-design-120-accurate [design]
   let weight compute-real-weight design
   let freqs first-two-natural-frequencies-accurate design
@@ -224,11 +293,13 @@ to-report evaluate-design-120-accurate [design]
 end
 
 
+;; Reporter general del fitness usado por el CSA durante la busqueda.
+;; En esta implementacion devuelve la evaluacion rapida.
 to-report evaluate-design [design]
   report evaluate-design-120-fast design
 end
 
-
+;; Devuelve la matriz de masa consistente elemental de una barra 3D.
 to-report element-consistent-mass-3d [area node-i node-j]
   let elem-length distance-between-nodes node-i node-j
   let coeff (effective-density * area * elem-length / 6)
@@ -245,12 +316,12 @@ to-report element-consistent-mass-3d [area node-i node-j]
 end
 
 
-
 ; ==========================================================
 ; UTILIDADES VECTORIALES
 ; ==========================================================
 
-
+;; Devuelve una copia explicita de un diseño de 7 variables.
+;; Si el argumento no es un diseño valido, devuelve lista vacia.
 to-report copy-design [design]
   if (not is-list? design) or (length design != 7) [
     report []
@@ -267,16 +338,18 @@ to-report copy-design [design]
   )
 end
 
-;;Ceros: vector y matriz
+;; Construye un vector de ceros de longitud n.
 to-report zero-vector [n]
   report n-values n [ i -> 0 ]
 end
 
-to-report zero-matrix [rows cols]
+;; Construye una matriz de ceros de tamaño rows x cols.
   report n-values rows [ r -> n-values cols [ c -> 0 ] ]
 end
 
-;;Reemplazar un valor en una matriz
+
+;; Devuelve una copia de la matriz con un valor reemplazado
+;; en la posicion [row-index, col-index].
 to-report matrix-set [mat row-index col-index new-value]
   let selected-row item row-index mat
   let updated-row replace-item col-index selected-row new-value
@@ -284,52 +357,64 @@ to-report matrix-set [mat row-index col-index new-value]
 end
 
 
-;;Sumar a una posición concreta de la matriz
+;; Suma un incremento a una posicion concreta de una matriz
+;; y devuelve la matriz resultante.
 to-report matrix-add [mat row-index col-index increment]
   let current-value item col-index (item row-index mat)
   report matrix-set mat row-index col-index (current-value + increment)
 end
 
+;; Suma componente a componente dos vectores.
 to-report vec-add [a b]
   report (map [[x y] -> x + y] a b)
 end
 
+;; Resta componente a componente dos vectores.
 to-report vec-sub [a b]
   report (map [[x y] -> x - y] a b)
 end
 
+;; Multiplica un vector por un escalar.
 to-report vec-scale [s a]
   report (map [x -> s * x] a)
 end
 
+;; Calcula la norma euclidea de un vector.
 to-report vec-norm [a]
   report sqrt (sum (map [x -> x * x] a))
 end
 
+;; Limita componente a componente un vector entre dos listas de cotas.
 to-report vec-clip [a low high]
   report (map [[x lo hi] -> max list lo (min list x hi)] a low high)
 end
 
+;; Limita el valor absoluto de cada componente de un vector.
 to-report vec-limit-components [a lim]
   report (map [x -> max list (- lim) (min list x lim)] a)
 end
 
+;; Genera un vector aleatorio uniforme entre dos listas de limites.
 to-report random-vector-between [low high]
   report (map [[lo hi] -> lo + random-float (hi - lo)] low high)
 end
 
+;; Genera un vector de longitud n con componentes uniformes en [-1,1].
 to-report random-uniform-vector [n]
   report n-values n [ -> (random-float 2 - 1) ]
 end
 
 
 
-
 ; ==========================================================
-; MODELO DEL DOMO DE 120 BARRAS
+; MODELO ESTRUCTURAL DEL DOMO DE 120 BARRAS
+; Geometria, conectividad, ensamblaje FEM y calculo modal.
 ; Basado en el benchmark de 49 nodos / 120 barras / 7 grupos
 ; ==========================================================
 
+
+;; Construye el modelo completo del domo:
+;; nodos, conectividad, longitudes y grados de libertad.
 to build-120bar-model
   ;; 49 nodos espaciales, 3 DOFs por nodo
   set total-dofs (49 * 3)
@@ -354,7 +439,7 @@ to build-120bar-model
   set free-dofs build-free-dofs
 end
 
-;; coordenadas nodales
+;; Genera las coordenadas 3D de los 49 nodos del domo.
 to build-120bar-node-coords
   set node-coords []
 
@@ -411,7 +496,7 @@ end
 
 
 
-;;Conectividad de las 120 barras
+;; Genera la conectividad de las 120 barras segun la agrupacion del benchmark.
 to build-120bar-connectivity
   set member-connectivity []
 
@@ -496,7 +581,7 @@ to build-120bar-connectivity
   set member-connectivity lput (list 1 36) member-connectivity
 end
 
-;;Longitudes de las barras
+;; Calcula la longitud de cada barra a partir de la conectividad y las coordenadas.
 to build-120bar-member-lengths
   set member-lengths []
 
@@ -511,11 +596,12 @@ to build-120bar-member-lengths
   ]
 end
 
+;; Devuelve las coordenadas [x y z] de un nodo dado su identificador.
 to-report node-xyz [node-id]
   report item (node-id - 1) node-coords
 end
 
-
+;; Calcula la distancia euclidea entre dos nodos del domo.
 to-report distance-between-nodes [ni nj]
   let p node-xyz ni
   let q node-xyz nj
@@ -527,11 +613,15 @@ to-report distance-between-nodes [ni nj]
   report sqrt (delta-x * delta-x + delta-y * delta-y + delta-z * delta-z)
 end
 
+;; Devuelve los tres indices globales de grados de libertad de un nodo.
 to-report node-dof-indices [node-id]
   let base (3 * (node-id - 1))
   report (list base (base + 1) (base + 2))
 end
 
+
+;; Construye la lista de grados de libertad restringidos
+;; a partir de los nodos apoyados.
 to-report build-restrained-dofs
   let result []
   let i 0
@@ -546,6 +636,9 @@ to-report build-restrained-dofs
   report result
 end
 
+
+;; Construye la lista de grados de libertad libres
+;; eliminando los restringidos del total.
 to-report build-free-dofs
   let result []
   let d 0
@@ -560,12 +653,15 @@ to-report build-free-dofs
   report result
 end
 
+;; Devuelve los seis grados de libertad de una barra 3D.
 to-report element-dof-indices [node-i node-j]
   report sentence (node-dof-indices node-i) (node-dof-indices node-j)
 end
 
 
-;;Expansión del diseño de 7 variables a 120 barras reales
+
+;; Expande el diseño de 7 areas a las 120 barras reales
+;; y convierte cm² a m².
 to-report expand-design-to-members [design]
   ;; design = [A1 ... A7] en cm^2
   ;; salida = lista de 120 áreas en m^2
@@ -593,7 +689,8 @@ end
 
 
 
-;;Extraer una submatriz por índices
+;; Extrae una submatriz de una matriz global
+;; usando una lista de indices de fila y columna.
 to-report submatrix-by-indices [full-matrix index-list]
   let result []
   let row-pos 0
@@ -618,8 +715,7 @@ to-report submatrix-by-indices [full-matrix index-list]
   report result
 end
 
-
-;; rigidez elemental 
+;; Devuelve la matriz de rigidez elemental 3D de una barra.
 to-report element-stiffness-3d [area node-i node-j]
   let coord-i node-xyz node-i
   let coord-j node-xyz node-j
@@ -666,7 +762,9 @@ to-report element-stiffness-3d [area node-i node-j]
 end
 
 
-;; ensamblaje de la rigidez
+
+;; Ensambla la matriz de rigidez global del domo
+;; a partir del diseño actual.
 to-report assemble-global-stiffness [design]
   let member-areas expand-design-to-members design
   let global-k zero-matrix total-dofs total-dofs
@@ -704,8 +802,9 @@ to-report assemble-global-stiffness [design]
 end
 
 
-;; Masa global lummped (matriz diagonal)
 
+;; Ensambla la matriz de masas global del domo:
+;; incluye masa estructural y masas nodales no estructurales.
 to-report assemble-global-mass [design]
   let member-areas expand-design-to-members design
   let global-m zero-matrix total-dofs total-dofs
@@ -792,7 +891,7 @@ to-report assemble-global-mass [design]
 end
 
 
-;;.......
+;; Devuelve la traspuesta de una matriz.
 to-report matrix-transpose [mat]
   let rows length mat
   let cols length first mat
@@ -812,7 +911,7 @@ to-report matrix-transpose [mat]
   report result
 end
 
-;;...............
+;; Calcula la descomposicion de Cholesky de una matriz simetrica definida positiva.
 to-report cholesky-decomposition [mat]
   let n length mat
   let lower-tri zero-matrix n n
@@ -852,7 +951,7 @@ to-report cholesky-decomposition [mat]
 end
 
 
-;;...............
+;; Resuelve un sistema triangular inferior con varios terminos independientes.
 to-report solve-lower-left [lower-mat rhs-mat]
   let n length lower-mat
   let ncols length first rhs-mat
@@ -884,8 +983,9 @@ to-report solve-lower-left [lower-mat rhs-mat]
 end
 
 
-;; pasar problema modal a generalizado estandar
 
+;; Convierte el problema modal generalizado K phi = lambda M phi
+;; en un problema estandar usando Cholesky.
 to-report generalized-to-standard-matrix-full [reduced-k reduced-m]
   let lower-chol cholesky-decomposition reduced-m
 
@@ -908,8 +1008,7 @@ end
 ; UTILIDADES PARA JACOBI
 ; ----------------------------------------------------------
 
-;;Diagonal de una matriz
-
+;; Extrae la diagonal principal de una matriz.
 to-report matrix-diagonal [mat]
   let result []
   let i 0
@@ -922,8 +1021,9 @@ to-report matrix-diagonal [mat]
   report result
 end
 
-;;Buscar el máximo fuera de diagonal
 
+;; Busca la posicion y el valor maximo fuera de la diagonal
+;; de una matriz simetrica.
 to-report max-offdiag-position [mat]
   let n length mat
   let best-row 0
@@ -948,9 +1048,7 @@ to-report max-offdiag-position [mat]
   report (list best-row best-col best-value)
 end
 
-
-;;Método de Jacobi para autovalores
-
+;; Calcula autovalores aproximados mediante el metodo de Jacobi.
 to-report jacobi-eigenvalues [input-matrix tolerance max-rotations]
   let mat input-matrix
   let n length mat
@@ -1016,10 +1114,9 @@ to-report jacobi-eigenvalues [input-matrix tolerance max-rotations]
 end
 
 
-;;-----------
-;;Cálculo de las dos primeras frecuencias naturales
-;;.............
 
+;; Calcula las dos primeras frecuencias naturales del domo
+;; usando un numero dado de iteraciones de Jacobi.
 to-report first-two-natural-frequencies-with-rotations [design jacobi-rotations]
   let global-k assemble-global-stiffness design
   let global-m assemble-global-mass design
@@ -1050,7 +1147,7 @@ to-report first-two-natural-frequencies-with-rotations [design jacobi-rotations]
 end
 
 
-;; peso real del domo
+;; Calcula el peso real total del domo a partir de las 7 areas del diseño.
 to-report compute-real-weight [design]
   let member-areas expand-design-to-members design
   let total-weight 0
@@ -1071,6 +1168,10 @@ end
 ; ----------------------------------------------------------
 ; REPORTERS
 ; ----------------------------------------------------------
+
+
+;; Devuelve el mejor diseño global en formato texto
+;; para mostrarlo en un monitor de la interfaz.
 to-report g-best-vars-text
   if (not is-list? g-best-vars) or empty? g-best-vars [
     report "Sin inicializar"
@@ -1087,8 +1188,52 @@ to-report g-best-vars-text
   )
 end
 
+
+;; Devuelve el valor del mejor fitness global
+;; en formato reducido para la interfaz.
 to-report g-best-val-text
   report precision g-best-val 6
+end
+
+
+
+;; Actualiza las metricas cacheadas de la interfaz:
+;; peso, frecuencias, violacion, factibilidad y margenes.
+;; Se usa para evitar recalcular el FEM continuamente en monitores.
+to update-ui-metrics
+  if (not is-list? g-best-vars) or empty? g-best-vars [
+    set ui-best-weight 0
+    set ui-best-f1 0
+    set ui-best-f2 0
+    set ui-best-violation 0
+    set ui-best-feasible "NO"
+    set ui-best-margin-f1 0
+    set ui-best-margin-f2 0
+    stop
+  ]
+
+  let freqs first-two-natural-frequencies-accurate g-best-vars
+  let f1 item 0 freqs
+  let f2 item 1 freqs
+
+  let viol 0
+  if f1 < min-frequency-1 [
+    set viol viol + ((min-frequency-1 - f1) / min-frequency-1)
+  ]
+  if f2 < min-frequency-2 [
+    set viol viol + ((min-frequency-2 - f2) / min-frequency-2)
+  ]
+
+  set ui-best-weight compute-real-weight g-best-vars
+  set ui-best-f1 f1
+  set ui-best-f2 f2
+  set ui-best-violation viol
+  set ui-best-margin-f1 (f1 - min-frequency-1)
+  set ui-best-margin-f2 (f2 - min-frequency-2)
+
+  ifelse viol = 0
+  [ set ui-best-feasible "SI" ]
+  [ set ui-best-feasible "NO" ]
 end
 
 
@@ -1101,18 +1246,18 @@ end
 
 ;; Devuelve el parámetro μ(t) del paper.
 ;; μ controla el equilibrio exploración/explotación y decrece con las iteraciones.
-
 to-report mu-paper [iter-num max-iter]
   let ratio (iter-num / max-iter)
   report (csa-gamma * exp ( - ((csa-alpha * ratio) ^ csa-beta) ))
 end
 
-
+;; Devuelve ω(t), el factor de inercia usado en la fase de lengua.
 to-report omega-paper [iter-num max-iter]
   report (1 - (iter-num / max-iter))
 end
 
-
+;; Devuelve la aceleracion usada en la fase de lengua.
+;; Se limita para evitar divisiones por cero o valores demasiado pequeños.
 to-report accel-paper [iter-num]
   let a (2590 * (1 - (1 / (iter-num + 1))))
   if a < 1 [
@@ -1122,11 +1267,32 @@ to-report accel-paper [iter-num]
 end
 
 
-;; Implementa la Eq. (3) del paper:
-;; - rama 1: movimiento guiado por p-best y g-best
-;; - rama 2: exploración aleatoria proporcional al rango de búsqueda
 
+;; Implementa la fase de busqueda/percepcion del CSA.
+;; Combina una rama guiada por p-best y g-best con una rama
+;; de exploracion aleatoria proporcional al rango de busqueda.
 to-report csa-search-step [x pbest gbest iter-num max-iter]
+  ;; Blindajes contra listas vacías o mal formadas
+  if not valid-design-list? x [
+    report random-design
+  ]
+
+  if not valid-design-list? pbest [
+    set pbest copy-design x
+  ]
+
+  if not valid-design-list? gbest [
+    set gbest copy-design pbest
+  ]
+
+  if (not is-list? lower-bounds) or (length lower-bounds != number-of-groups) [
+    report copy-design x
+  ]
+
+  if (not is-list? upper-bounds) or (length upper-bounds != number-of-groups) [
+    report copy-design x
+  ]
+
   let mu mu-paper iter-num max-iter
   let result []
   let j 0
@@ -1158,7 +1324,7 @@ to-report csa-search-step [x pbest gbest iter-num max-iter]
       set new-xj (xj + mu * (uj - lj) * r3 * sign-dir)
     ]
 
-    ;; forzar límites
+    ;; Limitar al dominio
     if new-xj < lj [ set new-xj lj ]
     if new-xj > uj [ set new-xj uj ]
 
@@ -1170,9 +1336,9 @@ to-report csa-search-step [x pbest gbest iter-num max-iter]
 end
 
 
-;; Aproximación práctica de la rotación ocular en 7D:
-;; se rota el desplazamiento en un plano aleatorio de dos dimensiones.
 
+;; Implementa una aproximacion practica de la rotacion ocular:
+;; rota el desplazamiento del camaleon en un plano aleatorio de dos dimensiones.
 to-report csa-eye-rotation-step [x-old x-search]
   let d length x-old
   if d < 2 [ report x-search ]
@@ -1209,10 +1375,9 @@ to-report csa-eye-rotation-step [x-old x-search]
 end
 
 
-;; Implementa la fase de lengua:
-;; - actualiza velocidad con Eq. (18)
-;; - actualiza posición con la forma cinemática de Eq. (20)
 
+;; Implementa la fase de lengua del CSA:
+;; actualiza velocidad y posicion segun el esquema cinemático del algoritmo.
 to-report csa-tongue-step [x-current pbest gbest old-vel iter-num max-iter]
   let omega omega-paper iter-num max-iter
   let a accel-paper iter-num
@@ -1254,12 +1419,11 @@ to-report csa-tongue-step [x-current pbest gbest old-vel iter-num max-iter]
 end
 
 
-;; Aceptación greedy:
-;; solo se adopta el candidato si mejora realmente el fitness actual.
-;; Se usa una evaluación rápida como filtro y una evaluación precisa para confirmar.
 
+;; Aplica aceptacion greedy:
+;; un candidato solo se adopta si mejora el fitness actual.
+;; Usa evaluacion rapida como filtro y precisa para confirmacion.
 to csa-greedy-move [candidate-vars candidate-fast-val candidate-vel]
-  let current-weight compute-real-weight vars
   let candidate-weight compute-real-weight candidate-vars
 
   ;; si la actual ya es factible y el candidato pesa igual o más, no merece validar
@@ -1274,56 +1438,59 @@ to csa-greedy-move [candidate-vars candidate-fast-val candidate-vel]
     if candidate-accurate-val < current-val [
       set vars candidate-vars
       set current-val candidate-accurate-val
+      set current-weight candidate-weight
       set vel candidate-vel
     ]
   ]
 end
 
 
-
-;; Iteración principal del CSA:
-;; 1) actualizar mejores
-;; 2) aplicar búsqueda
-;; 3) aplicar rotación ocular
-;; 4) aplicar lengua
-;; 5) aceptar de forma greedy
+to-report valid-design-list? [x]
+  if not is-list? x [ report false ]
+  if length x != number-of-groups [ report false ]
+  report true
+end
 
 
+
+
+;; Iteracion principal del CSA:
+;; actualiza mejores, aplica las tres fases del algoritmo
+;; y refresca interfaz y graficos periodicamente.
 to go
-  
   if ticks >= max-iterations [ stop ]
 
-  ;; asegurar global best actual
+  ;; red de seguridad: asegurar g-best válido al inicio
   update-personal-global-best
 
   let iter-num (ticks + 1)
   let max-iter max-iterations
 
   ask particles [
+    ;; si por algún motivo p-best no está bien, lo resembramos
+    if not valid-design-list? p-best-vars [
+      set p-best-vars copy-design vars
+      set p-best-val current-val
+    ]
+
     let x0 copy-design vars
     let old-vel vel
 
-    ;; --------------------------------------------------
-    ;; Paso 1: búsqueda / percepción (Eq. 3)
-    ;; --------------------------------------------------
+    ;; Paso 1: búsqueda / percepción
     let x1 csa-search-step x0 p-best-vars g-best-vars iter-num max-iter
     let f1 evaluate-design x1
     csa-greedy-move x1 f1 old-vel
 
     let x-after-search vars
 
-    ;; --------------------------------------------------
-    ;; Paso 2: rotación de ojos (Eq. 11)
-    ;; --------------------------------------------------
+    ;; Paso 2: rotación de ojos
     let x2 csa-eye-rotation-step x0 x-after-search
     let f2 evaluate-design x2
     csa-greedy-move x2 f2 old-vel
 
     let x-after-eye vars
 
-    ;; --------------------------------------------------
-    ;; Paso 3: ataque con la lengua (Eq. 18 + Eq. 20)
-    ;; --------------------------------------------------
+    ;; Paso 3: ataque con la lengua
     let tongue-output csa-tongue-step x-after-eye p-best-vars g-best-vars old-vel iter-num max-iter
     let x3 item 0 tongue-output
     let v3 item 1 tongue-output
@@ -1331,10 +1498,15 @@ to go
     csa-greedy-move x3 f3 v3
   ]
 
-  ;; actualizar mejores personales y globales al final del tick
   update-personal-global-best
 
+
   if ticks mod 20 = 0 [
+    update-ui-metrics
+    update-plots
+  ]
+  if ticks = (max-iterations - 1) [
+      update-ui-metrics
     update-plots
   ]
 
@@ -1344,11 +1516,17 @@ end
 
 
 
+
+
 ; ==========================================================
-; DIAGNOSTICO Y VALIDACION
+; DEBUG Y VALIDACION
+; Funciones auxiliares para depuracion y analisis manual.
+; No forman parte del uso normal desde la interfaz.
 ; ==========================================================
 
 
+;; Ejecuta n iteraciones y muestra por consola
+;; el mejor fitness y el mejor diseño en cada paso.
 to trace-csa [n]
   let k 0
   while [k < n] [
@@ -1360,6 +1538,7 @@ to trace-csa [n]
   ]
 end
 
+;; Imprime un resumen del modelo estructural del domo.
 to print-120bar-model-summary
   show "=============================================="
   show "RESUMEN MODELO DOMO 120 BARRAS"
@@ -1375,8 +1554,7 @@ to print-120bar-model-summary
   show "=============================================="
 end
 
-
-
+;; Comprueba si el modelo generado coincide con los datos esperados del benchmark.
 to check-120bar-benchmark-consistency
   show "=============================================="
   show "CHECK CONSISTENCIA BENCHMARK 120-BAR"
@@ -1410,7 +1588,7 @@ to check-120bar-benchmark-consistency
 end
 
 
-
+;; Imprime por consola el mejor diseño actual y su peso real.
 to print-current-best-design
   show "=============================================="
   show "MEJOR DISENO ACTUAL"
@@ -1438,6 +1616,8 @@ to print-current-best-design
 end
 
 
+;; Imprime por consola el estado dinamico del mejor diseño actual:
+;; frecuencias, violacion, peso y fitness.
 to print-current-best-dynamic-status
   let best-design g-best-vars
 
@@ -1472,7 +1652,7 @@ to print-current-best-dynamic-status
 end
 
 
-
+;; Imprime el peso aportado por cada grupo de barras de un diseño dado.
 to print-weight-breakdown-for-design [design]
   let expected-counts member-group-counts
   let start-index 0
@@ -1516,7 +1696,7 @@ to print-weight-breakdown-for-design [design]
   show "=============================================="
 end
 
-
+;; Imprime la longitud total asociada a cada grupo de barras.
 to print-group-length-breakdown
   let start-index 0
   let group-index 0
@@ -1550,6 +1730,8 @@ to print-group-length-breakdown
 end
 
 
+;; Estudia la convergencia del calculo modal
+;; al variar el numero de iteraciones de Jacobi.
 to print-jacobi-rotation-study [design]
   let rotation-list [2000 5000 12000 20000 40000]
 
@@ -1585,8 +1767,7 @@ end
     <button x="241" y="65" height="47" disableUntilTicks="false" forever="false" kind="Observer" width="102" sizeVersion="0">setup</button>
     <button x="240" y="174" height="44" disableUntilTicks="false" forever="true" kind="Observer" width="103" sizeVersion="0">go</button>
     <button x="241" y="120" height="46" disableUntilTicks="false" forever="false" kind="Observer" display="step" width="102" sizeVersion="0">go</button>
-    <slider x="381" step="1" y="30" max="100" display="population-size" height="33" min="1" direction="Horizontal" default="8.0" variable="population-size" width="174" sizeVersion="0"></slider>
-    <plot x="18" autoPlotX="true" yMax="10.0" autoPlotY="true" yAxis="fitness" y="306" xMin="0.0" height="200" legend="true" xMax="10.0" yMin="0.0" xAxis="iteración" display="Convergencia" width="342" sizeVersion="0">
+    <plot x="18" autoPlotX="true" yMax="10.0" autoPlotY="true" yAxis="fitness" y="306" xMin="0.0" height="200" legend="true" xMax="10.0" yMin="0.0" xAxis="ticks" display="Convergencia" width="342" sizeVersion="0">
       <setup></setup>
       <update></update>
       <pen interval="1.0" mode="0" display="mejor" color="-2674135" legend="true">
@@ -1594,55 +1775,192 @@ end
         <update>plot g-best-val</update>
       </pen>
     </plot>
-    <monitor x="379" precision="2" y="400" height="92" fontSize="11" width="509" display="g-best-vars-text">g-best-vars-text</monitor>
     <slider x="10" step="0.01" y="24" max="1.30" width="210" display="young-modulus-factor" height="51" min="0.70" direction="Horizontal" default="1.0" variable="young-modulus-factor"></slider>
     <slider x="8" step="0.01" y="89" max="1.30" width="210" display="density-factor" height="51" min="0.70" direction="Horizontal" default="1.0" variable="density-factor"></slider>
     <slider x="6" step="0.01" y="152" max="1.50" width="210" display="nonstructural-mass-factor" height="51" min="0.50" direction="Horizontal" default="1.0" variable="nonstructural-mass-factor"></slider>
     <slider x="8" step="0.01" y="215" max="1.25" width="210" display="frequency-target-factor" height="51" min="0.80" direction="Horizontal" default="1.0" variable="frequency-target-factor"></slider>
-    <slider x="381" step="10" y="73" max="1000" display="max-iterations" height="33" min="10" direction="Horizontal" default="300.0" variable="max-iterations" width="174" sizeVersion="0"></slider>
     <monitor x="242" precision="17" y="241" height="60" fontSize="11" display="Iteracion" width="100" sizeVersion="0">ticks</monitor>
-    <slider x="398" step="0.01" y="151" max="0.15" display="csa-Pp" height="33" min="0.05" direction="Horizontal" default="0.1" variable="csa-Pp" width="174" sizeVersion="0"></slider>
-    <slider x="397" step="0.05" y="233" max="1.5" display="csa-p2" height="33" min="0.5" direction="Horizontal" default="0.85" variable="csa-p2" width="174" sizeVersion="0"></slider>
-    <slider x="397" step="0.05" y="193" max="1" display="csa-p1" height="33" min="0.25" direction="Horizontal" default="0.85" variable="csa-p1" width="174" sizeVersion="0"></slider>
-    <slider x="397" step="0.5" y="315" max="4.0" display="csa-beta" height="33" min="2.5" direction="Horizontal" default="3.0" variable="csa-beta" width="174" sizeVersion="0"></slider>
-    <slider x="397" step="0.5" y="273" max="4.0" display="csa-alpha" height="33" min="2.5" direction="Horizontal" default="3.5" variable="csa-alpha" width="174" sizeVersion="0"></slider>
-    <monitor x="614" precision="5" y="316" height="60" fontSize="11" width="100" display="g-best-val">g-best-val</monitor>
+    <monitor x="608" precision="5" y="41" height="60" fontSize="11" width="100" display="peso-real">ui-best-weight</monitor>
+    <monitor x="608" precision="5" y="113" height="60" fontSize="11" width="100" display="f1">ui-best-f1</monitor>
+    <monitor x="608" precision="5" y="175" height="60" fontSize="11" width="100" display="f2">ui-best-f1</monitor>
+    <monitor x="373" precision="2" y="416" height="92" fontSize="11" width="509" display="g-best-vars-text">g-best-vars-text</monitor>
+    <monitor x="374" precision="5" y="353" height="60" fontSize="11" width="100" display="g-best-val">g-best-val</monitor>
+    <monitor x="722" precision="5" y="113" height="60" fontSize="11" width="100" display="margen-f1">ui-best-margin-f1</monitor>
+    <monitor x="722" precision="17" y="175" height="60" fontSize="11" width="100" display="margen-f2">ui-best-margin-f2</monitor>
+    <monitor x="608" precision="17" y="290" height="60" fontSize="11" width="100" display="factible">ui-best-feasible</monitor>
+    <monitor x="722" precision="5" y="290" height="60" fontSize="11" width="100" display="violacion-total">ui-best-violation</monitor>
+    <slider x="370" step="10" y="63" max="1000" display="max-iterations" height="33" min="10" direction="Horizontal" default="300.0" variable="max-iterations" width="174" sizeVersion="0"></slider>
+    <slider x="370" step="1" y="20" max="100" display="population-size" height="33" min="1" direction="Horizontal" default="8.0" variable="population-size" width="174" sizeVersion="0"></slider>
+    <slider x="395" step="0.5" y="283" max="4.0" display="csa-beta" height="33" min="2.5" direction="Horizontal" default="3.0" variable="csa-beta" width="174" sizeVersion="0"></slider>
+    <slider x="396" step="0.01" y="119" max="0.15" display="csa-Pp" height="33" min="0.05" direction="Horizontal" default="0.1" variable="csa-Pp" width="174" sizeVersion="0"></slider>
+    <slider x="395" step="0.05" y="201" max="1.5" display="csa-p2" height="33" min="0.5" direction="Horizontal" default="0.85" variable="csa-p2" width="174" sizeVersion="0"></slider>
+    <slider x="395" step="0.05" y="161" max="1" display="csa-p1" height="33" min="0.25" direction="Horizontal" default="0.85" variable="csa-p1" width="174" sizeVersion="0"></slider>
+    <slider x="395" step="0.5" y="241" max="4.0" display="csa-alpha" height="33" min="2.5" direction="Horizontal" default="3.5" variable="csa-alpha" width="174" sizeVersion="0"></slider>
   </widgets>
   <info>## ¿QUÉ ES ESTO?
 
-Implementación del Algoritmo de Enjambre de Camaleones (CSA) para NetLogo 3D 7.0.3.
-Minimiza la función esfera f(x,y) = x² + y² (mínimo global en el origen).
+Este modelo implementa el **Chameleon Swarm Algorithm (CSA)** para optimizar el problema clásico del **domo espacial de 120 barras**.
 
-## PARÁMETROS
+El modelo del domo incluye **apoyos en el anillo exterior** y **masas nodales no estructurales** en nodos seleccionados. Estas características afectan al cálculo dinámico de la estructura, pero las **restricciones explícitas de optimización** son únicamente:
 
-**MU-MAX / MU-MIN** — Rango del paso adaptativo μ(t). Decrece linealmente con las iteraciones. Valores recomendados: mu-max=1.0, mu-min=0.1.
+- **f1 ≥ 9 Hz**
+- **f2 ≥ 11 Hz**
 
-**Pp** — Probabilidad de exploración aleatoria en Fase 1. Valor recomendado: 0.05–0.15.
+Cada diseño está formado por **7 variables** (`A1 ... A7`), que representan las áreas de los 7 grupos de barras del benchmark. El algoritmo mueve una población de soluciones candidatas y va mejorando el mejor diseño encontrado.
 
-**MAX-ITERATIONS** — Iteraciones totales para el decaimiento de μ. Recomendado: 500.
+---
 
-**PARTICLE-INERTIA** — Amortiguación de la velocidad de lengua (Fase 3). Recomendado: 0.7.
+## ¿CÓMO SE USA?
 
-**ATTRACTION-TO-PERSONAL-BEST** — Ganancia hacia Pi en Fase 1 (explotación) y Fase 3. Recomendado: 1.0.
+### 1. Ajusta los parámetros
+En la interfaz puedes modificar:
 
-**ATTRACTION-TO-GLOBAL-BEST** — Ganancia de atracción hacia G en Fase 3 (proyección de lengua). Recomendado: 1.5.
+### Parámetros del problema
+- **young-modulus-factor** — escala el módulo de Young del material
+- **density-factor** — escala la densidad
+- **nonstructural-mass-factor** — escala las masas no estructurales aplicadas al domo
+- **frequency-target-factor** — escala las frecuencias mínimas requeridas
 
-**PARTICLE-SPEED-LIMIT** — Velocidad máxima de la proyección de lengua. Recomendado: 3.0.
+### Parámetros del algoritmo
+- **population-size** — número de partículas del enjambre
+- **max-iterations** — número máximo de iteraciones
+- **csa-Pp** — nivel de exploración aleatoria del CSA
+- **csa-p1** — peso del mejor personal en la fase de búsqueda
+- **csa-p2** — peso del mejor global en la fase de búsqueda
+- **csa-alpha** — parámetro del decaimiento adaptativo de μ(t)
+- **csa-beta** — parámetro del decaimiento adaptativo de μ(t)
 
-## FASES DEL CSA
+---
 
-**Fase 1 – Percepción:** con prob. Pp exploración aleatoria en [-1,1]×μ; si no, paso normalizado hacia Pi o G (50/50).
+### 2. Pulsa `setup`
+Esto:
+- construye el modelo estructural,
+- inicializa las partículas,
+- y calcula el mejor diseño inicial.
 
-**Fase 2 – Rotación ocular:** giro aleatorio de heading + avance, incondicional para todos los agentes cada tick.
+---
 
-**Fase 3 – Caza (lengua):** velocidad acumulada con inercia (particle-inertia) que atrae simultáneamente a Pi y G con pesos aleatorios independientes r1, r2. Esta doble atracción con momentum es la clave de la convergencia.
+### 3. Ejecuta el algoritmo
+Puedes usar:
+
+- **step** → ejecuta una sola iteración
+- **go** → ejecución continua
+
+---
+
+## PARÁMETROS RECOMENDADOS
+
+Para una ejecución estándar:
+
+- **population-size = 8**
+- **max-iterations = 300**
+- **csa-Pp = 0.10**
+- **csa-p1 = 0.85**
+- **csa-p2 = 0.85**
+- **csa-alpha = 3.5**
+- **csa-beta = 3.0**
+
+Y para el problema físico:
+
+- **young-modulus-factor = 1.0**
+- **density-factor = 1.0**
+- **nonstructural-mass-factor = 1.0**
+- **frequency-target-factor = 1.0**
+
+---
+
+## ¿QUÉ MUESTRAN LOS MONITORES?
+
+### Estado del algoritmo
+- **Iteracion** — iteración actual del proceso de optimización
+- **g-best-val** — mejor fitness encontrado hasta el momento
+- **g-best-vars-text** — vector de áreas del mejor diseño actual
+
+### Estado físico del mejor diseño
+- **peso-real** — peso real del mejor diseño actual
+- **f1** — primera frecuencia natural del mejor diseño
+- **f2** — segunda frecuencia natural del mejor diseño
+- **violacion-total** — nivel total de incumplimiento de restricciones
+- **factible** — indica si el mejor diseño actual cumple las restricciones
+
+### Márgenes dinámicos
+- **margen-f1** — diferencia entre la frecuencia f1 y la frecuencia mínima requerida
+- **margen-f2** — diferencia entre la frecuencia f2 y la frecuencia mínima requerida
+
+Si:
+- **factible = SI**
+- y **violacion-total = 0**
+
+entonces el mejor diseño actual cumple las restricciones dinámicas.
+
+---
+
+## ¿QUÉ MUESTRA EL GRÁFICO?
+
+El gráfico de **Convergencia** muestra la evolución del **mejor fitness** a lo largo de las iteraciones.
+
+- Si la curva baja, el algoritmo está encontrando diseños mejores.
+- Si la curva se aplana, el algoritmo está convergiendo o estancándose.
+
+---
+
+## ¿CÓMO INTERPRETAR UN BUEN RESULTADO?
+
+Un buen resultado debe tener:
+
+- **peso-real** lo más bajo posible
+- **f1 ≥ 9**
+- **f2 ≥ 11**
+- **violacion-total = 0**
+- **factible = SI**
+
+En general, un diseño con menor peso pero que no cumpla frecuencias **no es válido**.
+
+---
+
+## ¿QUÉ HACE EL CSA EN CADA ITERACIÓN?
+
+En cada iteración, cada partícula pasa por tres fases:
+
+1. **Búsqueda / percepción**  
+   Se mueve usando su mejor posición personal, la mejor global o una exploración aleatoria.
+
+2. **Rotación ocular**  
+   Se modifica la dirección del desplazamiento en un plano aleatorio del espacio de diseño.
+
+3. **Lengua / ataque**  
+   Se aplica un movimiento final basado en velocidad y atracción hacia soluciones prometedoras.
+
+Después de cada fase, solo se acepta una nueva posición si mejora realmente la solución actual.
+
+---
+
+## NOTAS
+
+- Este problema es **costoso computacionalmente**, porque cada evaluación implica análisis estructural y cálculo modal.
+- Las corridas largas suelen producir mejores resultados.
+- El rendimiento depende especialmente de:
+  -- `population-size`
+  -- `max-iterations`
+  - y de los parámetros del CSA
+
+---
 
 ## CRÉDITOS
 
-Raul Caubera Jimenez para  TFG del Grado de Informatica de UGR 2026
-CSA basado en: Malik et al., "Chameleon Swarm Algorithm: A Bio-Inspired Optimizer for Solving Engineering Design Problems."
-Adaptado para NetLogo 3D 7.0.3.
-CC BY-NC-SA 4.0</info>
+**Raul Caubera Jimenez**  
+Trabajo para el **TFG del Grado en Ingeniería Informática – UGR 2026**
+
+
+Basado en:
+
+**Malik Shehadeh Braik**,  
+*Chameleon Swarm Algorithm: A Bio-Inspired Optimizer for Solving Engineering Design Problems* 
+
+Adaptado e implementado para el problema del **domo de 120 barras** en NetLogo.
+
+Licencia recomendada para el código y adaptación: **CC BY-NC-SA 4.0**
+</info>
   <turtleShapes>
     <shape name="default" rotatable="true" editableColorIndex="0">
       <polygon color="-1920102913" filled="true" marked="true">
