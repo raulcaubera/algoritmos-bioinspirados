@@ -1796,7 +1796,7 @@ end
     <monitor x="778" precision="5" y="269" height="60" fontSize="11" width="100" display="violacion-total">ui-best-violation</monitor>
     <monitor x="664" precision="17" y="269" height="60" fontSize="11" width="100" display="factible">ui-best-feasible</monitor>
     <monitor x="778" precision="17" y="154" height="60" fontSize="11" width="100" display="margen-f2">ui-best-margin-f2</monitor>
-    <monitor x="664" precision="5" y="154" height="60" fontSize="11" width="100" display="f2">ui-best-f1</monitor>
+    <monitor x="664" precision="5" y="154" height="60" fontSize="11" width="100" display="f2">ui-best-f2</monitor>
     <monitor x="664" precision="5" y="92" height="60" fontSize="11" width="100" display="f1">ui-best-f1</monitor>
     <monitor x="664" precision="5" y="20" height="60" fontSize="11" width="100" display="peso-real">ui-best-weight</monitor>
     <monitor x="725" precision="5" y="347" height="60" fontSize="11" width="100" display="g-best-val">g-best-val</monitor>
@@ -1807,7 +1807,9 @@ end
     <slider x="452" step="0.01" y="186" max="0.15" display="csa-Pp" height="33" min="0.05" direction="Horizontal" default="0.1" variable="csa-Pp" width="174" sizeVersion="0"></slider>
     <slider x="451" step="0.5" y="350" max="4.0" display="csa-beta" height="33" min="2.5" direction="Horizontal" default="3.0" variable="csa-beta" width="174" sizeVersion="0"></slider>
     <slider x="426" step="10" y="130" max="1000" display="max-iterations" height="33" min="10" direction="Horizontal" default="100.0" variable="max-iterations" width="174" sizeVersion="0"></slider>
-    <chooser x="382" y="15" height="60" variable="accurate-rotations" current="2" width="250" display="accurate-rotations">
+    <chooser x="382" y="15" height="60" variable="accurate-rotations" current="4" width="250" display="accurate-rotations">
+      <choice type="double" value="500.0"></choice>
+      <choice type="double" value="1000.0"></choice>
       <choice type="double" value="3000.0"></choice>
       <choice type="double" value="5000.0"></choice>
       <choice type="double" value="12000.0"></choice>
