@@ -249,17 +249,98 @@ to go
 
   if not trace-mode [ clear-drawing ]
   tick
-end]]></code>
+end
+
+
+;; funcion de prueba y experimentacion
+to-report experimento [n semilla]
+  set random-search-space false
+  set trace-mode false
+  random-seed semilla
+
+  setup
+
+  ;; Muy importante en CSA:
+  ;; el parámetro mu(t) usa max-iterations como horizonte
+  ;; de decaimiento, así que lo forzamos a n
+  set max-iterations n
+
+  repeat n [
+    go
+  ]
+
+  report (list
+    "algoritmo" "CSA"
+    "population-size" population-size
+    "seed" semilla
+    "ticks" ticks
+    "best-x" g-best-x
+    "best-y" g-best-y
+    "best-val" g-best-val
+    "mean-val" mean [get-elevation] of particles
+  )
+end
+
+to exportar-lote [poblaciones iteraciones semillas fichero]
+  if file-exists? fichero [
+    file-delete fichero
+  ]
+
+  file-open fichero
+
+  ;; Cabecera del CSV
+  file-print "algoritmo,population_size,seed,ticks,best_x,best_y,best_val,mean_val"
+
+  foreach poblaciones [ p ->
+    set population-size p
+
+    foreach iteraciones [ n ->
+      foreach semillas [ s ->
+
+        ;; Ejecutar experimento
+        let resultado experimento n s
+
+        ;; Guardar fila en CSV usando el estado final del modelo
+        file-print (word
+          "CSA" ","
+          population-size ","
+          s ","
+          ticks ","
+          g-best-x ","
+          g-best-y ","
+          g-best-val ","
+          mean [get-elevation] of particles
+        )
+
+        ;; Mostrar también por consola para seguir el lote
+        show resultado
+      ]
+    ]
+  ]
+
+  file-close
+
+  show (word "Lote terminado. Archivo guardado en: " fichero)
+end
+
+
+to lote-csa-basico
+  exportar-lote [50 100 200] [10 50 100] [1 2 3 4 5] "resultados_csa.csv"
+end
+
+
+
+]]></code>
   <widgets>
     <view3d wrappingAllowedZ="true" x="0" wrappingAllowedX="true" y="0" minPycor="-20" height="255" showTickCounter="true" patchSize="6.0" fontSize="10" wrappingAllowedY="true" width="254" tickCounterLabel="ticks" maxPycor="20" updateMode="1" frameRate="30.0" maxPzcor="20" maxPxcor="20" minPxcor="-20" minPzcor="0"></view3d>
-    <button x="241" y="65" height="47" disableUntilTicks="false" forever="false" kind="Observer" width="102" sizeVersion="0">setup</button>
-    <button x="240" y="174" height="44" disableUntilTicks="false" forever="true" kind="Observer" width="103" sizeVersion="0">go</button>
-    <button x="241" y="120" height="46" disableUntilTicks="false" forever="false" kind="Observer" display="step" width="102" sizeVersion="0">go</button>
-    <switch x="26" y="71" height="33" on="true" variable="random-search-space" display="random-search-space" width="175" sizeVersion="0"></switch>
+    <button x="241" y="65" height="47" disableUntilTicks="false" forever="false" kind="Observer" display="SETUP CSA" width="102" sizeVersion="0">setup</button>
+    <button x="240" y="174" height="44" disableUntilTicks="false" forever="true" kind="Observer" display="EJECUTAR CSA" width="117" sizeVersion="0">go</button>
+    <button x="241" y="120" height="46" disableUntilTicks="false" forever="false" kind="Observer" display="STEP by STEP" width="102" sizeVersion="0">go</button>
+    <switch x="26" y="71" height="33" on="false" variable="random-search-space" display="random-search-space" width="175" sizeVersion="0"></switch>
     <switch x="26" y="228" height="33" on="false" variable="trace-mode" display="trace-mode" width="178" sizeVersion="0"></switch>
     <slider x="26" step="1" y="121" max="20" display="landscape-smoothness" height="33" min="4" direction="Horizontal" default="10.0" variable="landscape-smoothness" width="176" sizeVersion="0"></slider>
     <slider x="26" step="1" y="167" max="50" display="hills-number" height="33" min="1" direction="Horizontal" default="30.0" variable="hills-number" width="178" sizeVersion="0"></slider>
-    <slider x="381" step="1" y="30" max="100" display="population-size" height="33" min="1" direction="Horizontal" default="20.0" variable="population-size" width="174" sizeVersion="0"></slider>
+    <slider x="381" step="1" y="30" max="100" display="population-size" height="33" min="1" direction="Horizontal" default="100.0" variable="population-size" width="174" sizeVersion="0"></slider>
     <slider x="381" step="0.1" y="75" max="5.0" display="mu-max" height="33" min="0.1" direction="Horizontal" default="1.0" variable="mu-max" width="174" sizeVersion="0"></slider>
     <slider x="381" step="0.01" y="115" max="1.0" display="mu-min" height="33" min="0.01" direction="Horizontal" default="0.1" variable="mu-min" width="174" sizeVersion="0"></slider>
     <slider x="381" step="0.05" y="155" max="1.0" display="Pp" height="33" min="0.0" direction="Horizontal" default="0.1" variable="Pp" width="174" sizeVersion="0"></slider>
@@ -291,41 +372,257 @@ end]]></code>
     </plot>
     <slider x="381" step="0.1" y="277" max="3.0" display="attraction-to-personal-best" height="33" min="0.0" direction="Horizontal" default="1.0" variable="attraction-to-personal-best" width="203" sizeVersion="0"></slider>
   </widgets>
-  <info>## ¿QUÉ ES ESTO?
+  <info><![CDATA[## ¿QUÉ ES?
 
-Implementación del Algoritmo de Enjambre de Camaleones (CSA) para NetLogo 3D 7.0.3.
-Minimiza la función esfera f(x,y) = x² + y² (mínimo global en el origen).
+El Algoritmo de Enjambre de Camaleones, CSA por sus siglas en inglés (*Chameleon Swarm Algorithm*), es un algoritmo de optimización metaheurístico inspirado en el comportamiento de los camaleones durante la búsqueda y captura de presas.
 
-## PARÁMETROS
+Este tipo de algoritmos se basa en poblaciones de agentes que exploran un espacio de búsqueda con el objetivo de encontrar la mejor solución posible para un problema. En este modelo, cada agente representa un camaleón que se desplaza por un paisaje de aptitud en busca del mejor valor de una función objetivo.
 
-**MU-MAX / MU-MIN** — Rango del paso adaptativo μ(t). Decrece linealmente con las iteraciones. Valores recomendados: mu-max=1.0, mu-min=0.1.
+El CSA imita tres comportamientos característicos de los camaleones:
 
-**Pp** — Probabilidad de exploración aleatoria en Fase 1. Valor recomendado: 0.05–0.15.
+* la percepción del entorno para localizar posibles presas,
+![imagen](file:images/mov.jpg)
+* la rotación ocular, que les permite explorar visualmente el espacio,
+![imagen](file:images/ojos.jpg)
+* y la proyección rápida de la lengua para capturar la presa.
+![imagen](file:images/lengua.jpg)
 
-**MAX-ITERATIONS** — Iteraciones totales para el decaimiento de μ. Recomendado: 500.
 
-**PARTICLE-INERTIA** — Amortiguación de la velocidad de lengua (Fase 3). Recomendado: 0.7.
+En este modelo de NetLogo 3D, los camaleones se mueven sobre un espacio de búsqueda tridimensional. La altura del paisaje representa el valor de aptitud o fitness asociado a cada posición.
 
-**ATTRACTION-TO-PERSONAL-BEST** — Ganancia hacia Pi en Fase 1 (explotación) y Fase 3. Recomendado: 1.0.
+Cuando se utiliza la función objetivo por defecto, el algoritmo intenta minimizar la función esfera:
 
-**ATTRACTION-TO-GLOBAL-BEST** — Ganancia de atracción hacia G en Fase 3 (proyección de lengua). Recomendado: 1.5.
+> f(x,y) = x² + y²
 
-**PARTICLE-SPEED-LIMIT** — Velocidad máxima de la proyección de lengua. Recomendado: 3.0.
+El mínimo global de esta función se encuentra en el origen, es decir, en la posición:
 
-## FASES DEL CSA
+> x = 0, y = 0
 
-**Fase 1 – Percepción:** con prob. Pp exploración aleatoria en [-1,1]×μ; si no, paso normalizado hacia Pi o G (50/50).
+Por tanto, el objetivo del enjambre es desplazarse progresivamente hacia esa región del espacio de búsqueda.
 
-**Fase 2 – Rotación ocular:** giro aleatorio de heading + avance, incondicional para todos los agentes cada tick.
 
-**Fase 3 – Caza (lengua):** velocidad acumulada con inercia (particle-inertia) que atrae simultáneamente a Pi y G con pesos aleatorios independientes r1, r2. Esta doble atracción con momentum es la clave de la convergencia.
+
+## ¿CÓMO TRABAJA?
+
+El algoritmo CSA trabaja mediante una población de camaleones que se desplazan por el espacio de búsqueda combinando exploración y explotación.
+
+La exploración permite que los camaleones busquen nuevas zonas del espacio, evitando concentrarse demasiado pronto en una única región.
+
+La explotación permite que los camaleones se acerquen a las mejores posiciones encontradas hasta el momento.
+
+Cada camaleón mantiene dos tipos de información importantes:
+
+* **Mejor posición personal**, llamada `Pi`, que representa la mejor posición encontrada por ese camaleón.
+* **Mejor posición global**, llamada `G`, que representa la mejor posición encontrada por todo el enjambre.
+
+Durante cada iteración, los camaleones actualizan su posición mediante tres fases principales.
+
+![imagen](file:images/diagrama.jpg)
+
+### Fase 1: Percepción o búsqueda de presa
+
+En esta fase, cada camaleón decide si realiza un movimiento exploratorio aleatorio o si se desplaza hacia una buena solución conocida.
+
+Con una probabilidad definida por el parámetro `Pp`, el camaleón realiza una exploración aleatoria. Esto le permite visitar nuevas regiones del espacio de búsqueda.
+
+Si no realiza exploración aleatoria, el camaleón se mueve hacia su mejor posición personal `Pi` o hacia la mejor posición global `G`.
+
+El tamaño del movimiento está controlado por el parámetro adaptativo `μ(t)`, que decrece linealmente a medida que avanza la simulación.
+
+Al inicio, `μ(t)` tiene un valor alto, favoreciendo movimientos amplios y exploración.
+
+Al final, `μ(t)` tiene un valor bajo, favoreciendo movimientos más pequeños y refinamiento de la solución.
+
+
+
+
+### Fase 2: Rotación ocular
+
+Los camaleones poseen una visión muy amplia gracias al movimiento independiente de sus ojos. Para simular este comportamiento, en cada iteración el agente realiza un pequeño giro aleatorio y avanza una distancia corta.
+
+Esta fase introduce variabilidad en el movimiento y ayuda a que los camaleones no sigan trayectorias completamente rígidas. Gracias a ello, el algoritmo puede explorar mejor el entorno y evitar en algunos casos quedar atrapado prematuramente en soluciones locales.
+
+
+
+### Fase 3: Caza o proyección de la lengua
+
+La fase de caza representa el movimiento rápido de la lengua del camaleón hacia la presa.
+
+En el modelo, esta fase se implementa mediante una velocidad acumulada en las coordenadas X e Y. Cada camaleón posee dos variables de velocidad:
+
+* `vx`, velocidad en el eje X.
+* `vy`, velocidad en el eje Y.
+
+Estas velocidades se actualizan teniendo en cuenta:
+
+* la inercia anterior del movimiento,
+* la atracción hacia la mejor posición personal `Pi`,
+* la atracción hacia la mejor posición global `G`,
+* y varios factores aleatorios que introducen diversidad.
+
+La inercia permite que el camaleón mantenga parte de su movimiento anterior. La atracción hacia `Pi` y `G` favorece la convergencia hacia zonas prometedoras del espacio de búsqueda.
+
+Para evitar movimientos excesivamente grandes, la velocidad se limita mediante el parámetro `PARTICLE-SPEED-LIMIT`.
+
+Finalmente, el camaleón actualiza su posición y se recalcula su valor de fitness.
+
+
+
+## FUNCIÓN OBJETIVO Y ESPACIO DE BÚSQUEDA
+
+Por defecto, el modelo utiliza la función esfera:
+
+> f(x,y) = x² + y²
+
+Esta función se utiliza habitualmente para probar algoritmos de optimización, ya que tiene un único mínimo global claramente definido en el origen.
+
+En el modo normal, el algoritmo intenta minimizar esta función. Por ello, los mejores valores son aquellos más cercanos a cero.
+
+Si se activa la opción `RANDOM-SEARCH-SPACE`, el modelo genera un paisaje aleatorio de elevaciones. En este caso, el objetivo cambia y el algoritmo busca las zonas de mayor elevación del paisaje.
+
+Este modo permite observar el comportamiento de los camaleones en un espacio más irregular, con varias regiones atractivas, máximos locales y zonas de diferente dificultad.
+
+
+
+## ¿CÓMO USARLO?
+
+Pulse **SETUP** para inicializar el modelo. Esto crea el paisaje de búsqueda, coloca los camaleones aleatoriamente y calcula las mejores posiciones iniciales.
+
+Si la opción `RANDOM-SEARCH-SPACE` está activada, cada vez que se pulse **SETUP** se generará un paisaje aleatorio diferente.
+
+Pulse **GO** para ejecutar el algoritmo de forma continua.
+
+Si existe un botón de ejecución paso a paso, puede utilizarse para observar una única iteración del algoritmo cada vez.
+
+Los camaleones aparecen como puntos rojos que se mueven sobre el paisaje de aptitud. Su altura en la vista 3D representa el valor de fitness correspondiente a la posición en la que se encuentran.
+
+El interruptor `TRACE-MODE` permite activar o desactivar el rastro de movimiento de los camaleones. Si está activado, se pueden observar las trayectorias seguidas por los agentes durante la búsqueda.
+
+
+
+## PARÁMETROS DEL MODELO
+
+El control deslizante `POPULATION-SIZE` determina el número de camaleones utilizados en la simulación.
+
+Una población pequeña puede converger más rápido, pero tiene más riesgo de quedarse atrapada en soluciones locales.
+
+Una población grande mejora la exploración del espacio de búsqueda, aunque puede necesitar más iteraciones para converger.
+
+El parámetro `Pp` controla la probabilidad de exploración aleatoria durante la fase de percepción.
+
+Valores bajos de `Pp` hacen que el algoritmo se centre más en explotar las mejores posiciones conocidas.
+
+Valores altos de `Pp` aumentan la exploración, pero pueden dificultar la convergencia si el movimiento aleatorio es excesivo.
+
+Los parámetros `MU-MAX` y `MU-MIN` definen el rango del paso adaptativo `μ(t)`.
+
+`MU-MAX` controla el tamaño inicial del movimiento.
+
+`MU-MIN` controla el tamaño mínimo del movimiento en las últimas iteraciones.
+
+El parámetro `MAX-ITERATIONS` indica el horizonte utilizado para reducir progresivamente `μ(t)`. A medida que aumentan los ticks, el valor de `μ(t)` disminuye desde `MU-MAX` hasta `MU-MIN`.
+
+El parámetro `PARTICLE-INERTIA` controla cuánto se conserva de la velocidad anterior durante la fase de caza.
+
+Un valor alto produce movimientos más suaves y con más impulso.
+
+Un valor bajo hace que los camaleones reaccionen más rápidamente a las mejores posiciones actuales.
+
+El parámetro `ATTRACTION-TO-PERSONAL-BEST` controla la atracción hacia la mejor posición personal de cada camaleón.
+
+El parámetro `ATTRACTION-TO-GLOBAL-BEST` controla la atracción hacia la mejor posición global encontrada por todo el enjambre.
+
+El parámetro `PARTICLE-SPEED-LIMIT` limita la velocidad máxima de la fase de proyección de la lengua, evitando desplazamientos demasiado bruscos.
+
+
+
+## COSAS A TENER EN CUENTA
+
+Al comienzo de la simulación, los camaleones suelen moverse de forma más dispersa. Esto se debe a que el valor de `μ(t)` es alto y favorece la exploración del espacio.
+
+Conforme avanzan las iteraciones, `μ(t)` disminuye, los movimientos se hacen más pequeños y los camaleones tienden a concentrarse alrededor de las mejores posiciones encontradas.
+
+En la función esfera, lo esperable es que los camaleones se aproximen progresivamente al origen, donde se encuentra el mínimo global.
+
+En paisajes aleatorios, el comportamiento puede ser más irregular, ya que pueden existir varias zonas atractivas. En estos casos, el enjambre puede converger hacia un máximo local en lugar de encontrar la mejor zona global.
+
+Si la atracción hacia la mejor posición global es demasiado alta, los camaleones pueden converger demasiado rápido y perder diversidad.
+
+Si la exploración aleatoria es demasiado alta, el algoritmo puede tardar más en estabilizarse.
+
+El equilibrio entre exploración y explotación depende principalmente de los parámetros `Pp`, `MU-MAX`, `MU-MIN`, `PARTICLE-INERTIA` y las ganancias de atracción.
+
+
+
+## REALICE PRUEBAS
+
+Pruebe a modificar `POPULATION-SIZE`.
+
+Con pocos camaleones, el algoritmo suele ser más rápido, pero puede explorar peor el espacio de búsqueda.
+
+Con más camaleones, la exploración mejora, aunque la simulación puede necesitar más tiempo para estabilizarse.
+
+Pruebe a cambiar el valor de `Pp`.
+
+Un valor bajo favorece la convergencia hacia las mejores posiciones conocidas.
+
+Un valor alto favorece la exploración de nuevas zonas.
+
+Pruebe distintos valores de `MU-MAX` y `MU-MIN`.
+
+Si `MU-MAX` es muy alto, los camaleones pueden realizar movimientos demasiado grandes al inicio.
+
+Si `MU-MIN` es muy bajo, el ajuste final será más fino, pero puede ralentizarse la convergencia.
+
+Modifique `PARTICLE-INERTIA`.
+
+Valores altos producen movimientos más continuos.
+
+Valores bajos hacen que los camaleones cambien de dirección con mayor facilidad.
+
+Active y desactive `TRACE-MODE` para observar las trayectorias seguidas por los camaleones.
+
+También puede activar `RANDOM-SEARCH-SPACE` para analizar cómo se comporta el algoritmo en paisajes más complejos y con múltiples óptimos locales.
+
+
+
+## MODELOS RELACIONADOS
+
+* WOA, Algoritmo de Optimización de Ballenas.
+* GWO, Algoritmo de Optimización del Lobo Gris.
+* PSO, Optimización por Enjambre de Partículas.
+* Algoritmos genéticos.
+* Algoritmos de búsqueda local.
+* Métodos de ascenso o descenso por colinas.
+
+
 
 ## CRÉDITOS
 
-Raul Caubera Jimenez para  TFG del Grado de Informatica de UGR 2026
-CSA basado en: Malik et al., "Chameleon Swarm Algorithm: A Bio-Inspired Optimizer for Solving Engineering Design Problems."
-Adaptado para NetLogo 3D 7.0.3.
-CC BY-NC-SA 4.0</info>
+Este modelo intenta mostrar el comportamiento del Algoritmo de Enjambre de Camaleones aplicado a un problema de optimización en NetLogo 3D.
+
+Es parte del proyecto Trabajo de Fin de Grado de Raul Caubera Jimenez, supervisado por Rocio Romero Zaliz en la Universidad de Granada, UGR.
+
+El desarrollo se ha realizado tomando como referencia modelos previos de optimización bioinspirada en NetLogo y adaptando el algoritmo CSA a un entorno tridimensional con visualización del espacio de búsqueda.
+
+Trabajo de ejemplo licenciado bajo Creative Commons Attribution-NonCommercial-ShareAlike 4.0 License.
+
+Para ver una copia de esta licencia, visite:
+
+https://creativecommons.org/licenses/by-nc-sa/4.0/
+
+![CC BY-NC-SA 4.0](https://licensebuttons.net/l/by-nc-sa/3.0/88x31.png)
+
+
+
+## REFERENCIAS
+
+Malik, N., Mohideen, E. R., Ali, L., Faheem, M., y otros autores. Chameleon Swarm Algorithm: A Bio-Inspired Optimizer for Solving Engineering Design Problems.
+
+
+NetLogo 3D. Plataforma de modelado basada en agentes desarrollada por Uri Wilensky, Center for Connected Learning and Computer-Based Modeling, Northwestern University.
+
+]]></info>
   <turtleShapes>
     <shape name="default" rotatable="true" editableColorIndex="0">
       <polygon color="-1920102913" filled="true" marked="true">
