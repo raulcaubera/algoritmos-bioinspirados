@@ -8,6 +8,15 @@
 
 breed [ particles particle ]
 
+;; nodos visibles del domo 3D
+breed [ dome-nodes dome-node ]
+
+;; panel flotante de información en la vista 3D
+breed [ info-panels info-panel ]
+
+;; barras visibles del domo 3D
+undirected-link-breed [ dome-members dome-member ]
+
 globals [
   g-best-vars         ;; mejor solución global (lista)
   g-best-val          ;; mejor fitness global
@@ -68,6 +77,10 @@ globals [
   ui-best-margin-f1
   ui-best-margin-f2
   
+  ;; escala para dibujar el domo en la vista 3D
+  dome-visual-scale
+  dome-z-scale  
+  
   model-ready?
 
 ]
@@ -79,8 +92,17 @@ particles-own [
   p-best-val          ;; mejor fitness personal
   current-val         ;; fitness actual
   current-weight      ;; peso actual
+  
 ]
 
+dome-nodes-own [
+  dome-node-id        ;; identificador visual del nodo estructural 1..49
+]
+
+dome-members-own [
+  dome-member-index   ;; indice visual de la barra 0..119
+  dome-member-group   ;; grupo de diseño asociado 0..6
+]
 
 
 ; ==========================================================
@@ -101,14 +123,27 @@ to setup
 
   setup-design-space
   build-120bar-model
+  build-dome-visualization
+
+  ;; posicion inicial de la camara 3D
+  reset-perspective
+  setxyz 30 -45 30
+  facexyz 0 0 6
+
   initialize-particles
   seed-global-best
-  update-personal-global-best
-  update-ui-metrics
 
+  ;; Inicializar contador antes de cualquier función que use ticks
   reset-ticks
+
+  ;; Ahora ya se pueden actualizar métricas y visualización 3D
+  update-ui-metrics
+  update-dome-visualization
+
   set model-ready? true
 end
+
+
 
 
 ;; Calcula el mejor diseño global inicial a partir del mejor valor actual
@@ -182,6 +217,12 @@ to setup-design-space
   set csa-gamma 1.0
   set penalty-lambda 100000
   
+
+  ;; escala para dibujar el domo en la vista 3D
+  set dome-visual-scale 0.9
+  set dome-z-scale 1.8
+
+  
 end
 
 
@@ -201,7 +242,7 @@ to initialize-particles
     set vel zero-vector number-of-groups
     
     set current-weight compute-real-weight vars
-    set current-val evaluate-design-120-accurate vars
+    set current-val evaluate-design vars
     set p-best-vars copy-design vars
     set p-best-val current-val
 
@@ -263,6 +304,73 @@ to-report first-two-natural-frequencies-accurate [design]
   report first-two-natural-frequencies-with-rotations design accurate-rotations
 end
 
+;; =========================================
+;; FRECUENCIAS APROXIMADAS SIN FEM
+;; =========================================
+to-report approximate-frequencies [design]
+
+  let member-areas expand-design-to-members design
+  
+  let stiffness-x 0
+  let stiffness-y 0
+  let stiffness-z 0
+  
+  let mass 0
+  
+  let i 0
+  while [i < length member-areas] [
+    
+    let A item i member-areas
+    let L item i member-lengths
+    
+    let conn item i member-connectivity
+    let ni first conn
+    let nj last conn
+    
+
+    let node-i-xyz node-xyz ni
+    let node-j-xyz node-xyz nj
+
+    let dx-val ((item 0 node-j-xyz) - (item 0 node-i-xyz))
+    let dy-val ((item 1 node-j-xyz) - (item 1 node-i-xyz))
+    let dz-val ((item 2 node-j-xyz) - (item 2 node-i-xyz))
+
+    let norm sqrt (dx-val * dx-val + dy-val * dy-val + dz-val * dz-val)
+
+    if norm > 0 [
+      let cx (dx-val / norm)
+      let cy (dy-val / norm)
+      let cz (dz-val / norm)
+      
+      ;; rigidez direccional
+      let k (effective-young-modulus * A / L)
+      
+      set stiffness-x stiffness-x + (k * cx * cx)
+      set stiffness-y stiffness-y + (k * cy * cy)
+      set stiffness-z stiffness-z + (k * cz * cz)
+    ]
+
+    ;; masa
+    set mass mass + (effective-density * A * L)
+    
+    set i i + 1
+  ]
+
+  if mass <= 0 [ set mass 1 ]
+
+  ;; modos aprox (direccionales)
+  let f1 (sqrt (stiffness-x / mass) / (2 * pi))
+  let f2 (sqrt (stiffness-y / mass) / (2 * pi))
+  let f3 (sqrt (stiffness-z / mass) / (2 * pi))
+
+  ;; ordenamos (como modos reales)
+  let freqs sort (list f1 f2 f3)
+
+  report (list (item 0 freqs * 8) (item 1 freqs * 10))
+end
+
+
+
 
 ;; Evalua rapidamente un diseño:
 ;; peso real + penalizacion por violacion de frecuencias.
@@ -298,10 +406,56 @@ to-report evaluate-design-120-accurate [design]
   report weight + penalty
 end
 
+;; Evaluacion intermedia (FEM menos extricto en modo MIXTO)
+to-report evaluate-design-intermediate [design]
+
+  let weight compute-real-weight design
+  let freqs approximate-frequencies design
+
+  let f1 item 0 freqs
+  let f2 item 1 freqs
+
+  ;; penalización suave pero más realista
+  let v1 max list 0 (min-frequency-1 - f1)
+  let v2 max list 0 (min-frequency-2 - f2)
+
+  let penalty (penalty-lambda * (v1 + v2))
+
+  report weight + penalty
+end
+
+
+;; Evaluacion ultrarapida SIN FEM (SOLO para modo RAPIDO)
+to-report evaluate-design-ultrafast [design]
+
+  ;; penalización simple basada en áreas pequeñas
+  let penalty 0
+  
+  ;; evita valores muy pequeños (inviables estructuralmente)
+  foreach design [ a ->
+    if a < 5 [
+      set penalty penalty + (5 - a) * 100
+    ]
+  ]
+
+  ;; peso aproximado (sin FEM)
+  let approx-weight sum design
+
+  report approx-weight + penalty
+end
 
 ;; Reporter general del fitness usado por el CSA durante la busqueda.
 ;; En esta implementacion devuelve la evaluacion rapida.
 to-report evaluate-design [design]
+
+  if evaluation-mode = "RAPIDO" [
+    report evaluate-design-ultrafast design
+  ]
+
+  if evaluation-mode = "MIXTO" [
+    report evaluate-design-intermediate design
+  ]
+
   report evaluate-design-120-fast design
 end
 
@@ -499,6 +653,121 @@ to build-120bar-node-coords
   set node-coords lput (list 0 0 7.0) node-coords
 end
 
+
+;; Construye una representacion 3D simplificada del domo:
+;; nodos como turtles y barras como links.
+;; Construye una representacion 3D simplificada del domo:
+;; nodos como turtles y barras como links.
+to build-dome-visualization
+  ;; limpiar visualizacion anterior, por si se reconstruye
+  ask dome-members [ die ]
+  ask dome-nodes [ die ]
+  ask info-panels [ die ]
+
+  ;; crear nodos visibles
+  let node-index 1
+  while [node-index <= length node-coords] [
+    let xyz node-xyz node-index
+
+    create-dome-nodes 1 [
+      set dome-node-id node-index
+
+      setxyz
+        ((item 0 xyz) * dome-visual-scale)
+        ((item 1 xyz) * dome-visual-scale)
+        ((item 2 xyz) * dome-z-scale)
+
+      set size 0.35
+      set color gray + 2
+    ]
+
+    set node-index node-index + 1
+  ]
+
+  ;; crear barras visibles como links
+  let member-idx 0
+  while [member-idx < length member-connectivity] [
+    let conn item member-idx member-connectivity
+    let ni first conn
+    let nj last conn
+
+    let visual-node-i one-of dome-nodes with [dome-node-id = ni]
+    let visual-node-j one-of dome-nodes with [dome-node-id = nj]
+
+    if (visual-node-i != nobody) and (visual-node-j != nobody) [
+      ask visual-node-i [
+        create-dome-member-with visual-node-j [
+          set dome-member-index member-idx
+          set dome-member-group member-group-of-index member-idx
+          set color gray
+          set thickness 0.08
+        ]
+      ]
+    ]
+
+    set member-idx member-idx + 1
+  ]
+
+  ;; panel de texto flotante
+  create-info-panels 1 [
+    setxyz -16 -16 15
+    set size 0.1
+    set color white
+    set label-color white
+    set label "CSA DOMO 120"
+  ]
+end
+
+;; Devuelve un color segun el valor relativo del area.
+;; relative-area debe estar entre 0 y 1:
+;; - valores bajos  -> azul/celeste
+;; - valores medios -> verde/naranja
+;; - valores altos  -> rojo
+to-report area-color [relative-area]
+  if relative-area < 0.25 [ report sky ]
+  if relative-area < 0.50 [ report green ]
+  if relative-area < 0.75 [ report orange ]
+  report red
+end
+
+;; Actualiza colores, grosores y etiqueta 3D usando el mejor diseño global actual.
+;; Actualiza colores, grosores y etiqueta 3D usando el mejor diseño global actual.
+to update-dome-visualization
+  if (not is-list? g-best-vars) or empty? g-best-vars [
+    stop
+  ]
+
+  ;; actualizar barras segun area del grupo correspondiente
+  ask dome-members [
+    let group-id dome-member-group
+    let area item group-id g-best-vars
+
+    let low item group-id lower-bounds
+    let high item group-id upper-bounds
+
+    let rel ((area - low) / (high - low))
+
+    if rel < 0 [ set rel 0 ]
+    if rel > 1 [ set rel 1 ]
+
+    set color area-color rel
+
+    ;; grosor visual proporcional al area relativa
+    set thickness (0.04 + 0.35 * rel)
+  ]
+
+  ;; actualizar texto flotante
+ ask info-panels [
+  set label (word
+    "CSA DOMO 120\n"
+    "Fitness CSA: " precision g-best-val 3 "\n"
+    "Peso: " precision ui-best-weight 3 " kg\n"   
+    "f1: " precision ui-best-f1 4 " Hz\n"
+    "f2: " precision ui-best-f2 4 " Hz\n"
+  )
+]
+
+end
 
 
 ;; Genera la conectividad de las 120 barras segun la agrupacion del benchmark.
@@ -1008,6 +1277,26 @@ to-report generalized-to-standard-matrix-full [reduced-k reduced-m]
   report standard-a
 end
 
+;; Devuelve el grupo de diseño al que pertenece una barra,
+;; usando el indice de barra 0..119 y los conteos por grupo.
+to-report member-group-of-index [member-idx]
+  let accumulated 0
+  let group-index 0
+
+  while [group-index < length member-group-counts] [
+    set accumulated accumulated + (item group-index member-group-counts)
+
+    if member-idx < accumulated [
+      report group-index
+    ]
+
+    set group-index group-index + 1
+  ]
+
+  ;; Fallback defensivo: si por algun error el indice no entra
+  ;; en ningun grupo, se devuelve el grupo 0.
+  report 0
+end
 
 ; ----------------------------------------------------------
 ; UTILIDADES PARA JACOBI
@@ -1204,7 +1493,8 @@ end
 
 ;; Actualiza las metricas cacheadas de la interfaz:
 ;; peso, frecuencias, violacion, factibilidad y margenes.
-;; Se usa para evitar recalcular el FEM continuamente en monitores.
+;; En RAPIDO y MIXTO usa frecuencias aproximadas.
+;; En PRECISO usa frecuencias FEM reales.
 to update-ui-metrics
   if (not is-list? g-best-vars) or empty? g-best-vars [
     set ui-best-weight 0
@@ -1217,7 +1507,27 @@ to update-ui-metrics
     stop
   ]
 
-  let freqs first-two-natural-frequencies-accurate g-best-vars
+  ;; El peso real es relativamente barato.
+  set ui-best-weight compute-real-weight g-best-vars
+
+  let freqs []
+
+  ;; En RAPIDO mostramos frecuencias aproximadas para que la interfaz se mueva.
+  ;; No son frecuencias FEM reales.
+  if evaluation-mode = "RAPIDO" [
+    set freqs approximate-frequencies g-best-vars
+  ]
+
+  ;; En MIXTO usamos el mismo modelo aproximado de baja fidelidad.
+  if evaluation-mode = "MIXTO" [
+    set freqs approximate-frequencies g-best-vars
+  ]
+
+  ;; En PRECISO usamos el cálculo FEM real.
+  if evaluation-mode = "PRECISO" [
+    set freqs first-two-natural-frequencies-accurate g-best-vars
+  ]
+
   let f1 item 0 freqs
   let f2 item 1 freqs
 
@@ -1229,7 +1539,6 @@ to update-ui-metrics
     set viol viol + ((min-frequency-2 - f2) / min-frequency-2)
   ]
 
-  set ui-best-weight compute-real-weight g-best-vars
   set ui-best-f1 f1
   set ui-best-f2 f2
   set ui-best-violation viol
@@ -1429,24 +1738,52 @@ end
 ;; un candidato solo se adopta si mejora el fitness actual.
 ;; Usa evaluacion rapida como filtro y precisa para confirmacion.
 to csa-greedy-move [candidate-vars candidate-fast-val candidate-vel]
-  let candidate-weight compute-real-weight candidate-vars
 
-  ;; si la actual ya es factible y el candidato pesa igual o más, no merece validar
-  if (abs (current-val - current-weight) < 1.0e-9) and (candidate-weight >= current-weight) [
+  ;; =========================================
+  ;; MODO RAPIDO (SIN FEM)
+  ;; =========================================
+  if evaluation-mode = "RAPIDO" [
+    if candidate-fast-val < current-val [
+      set vars candidate-vars
+      set current-val candidate-fast-val
+      set current-weight sum candidate-vars
+      set vel candidate-vel
+    ]
     stop
   ]
 
-  ;; si la evaluación rápida no parece mejorar, no validamos preciso
-  if candidate-fast-val < current-val [
-    let candidate-accurate-val evaluate-design-120-accurate candidate-vars
-
-    if candidate-accurate-val < current-val [
+  ;; =========================================
+  ;; MODO MIXTO (USABLE, NO TAN LENTO)
+  ;; =========================================
+  if evaluation-mode = "MIXTO" [
+    if candidate-fast-val < current-val [
       set vars candidate-vars
-      set current-val candidate-accurate-val
-      set current-weight candidate-weight
+      set current-val candidate-fast-val
+      set current-weight compute-real-weight candidate-vars
       set vel candidate-vel
     ]
+    stop
   ]
+
+  ;; =========================================
+  ;; MODO PRECISO (FEM SIEMPRE)
+  ;; =========================================
+  if evaluation-mode = "PRECISO" [
+
+    let candidate-weight compute-real-weight candidate-vars
+
+    if candidate-fast-val < current-val [
+      let candidate-accurate-val evaluate-design-120-accurate candidate-vars
+
+      if candidate-accurate-val < current-val [
+        set vars candidate-vars
+        set current-val candidate-accurate-val
+        set current-weight candidate-weight
+        set vel candidate-vel
+      ]
+    ]
+  ]
+
 end
 
 
@@ -1511,19 +1848,34 @@ to go
 
   update-personal-global-best
 
-
-  if ticks mod 20 = 0 [
-    update-ui-metrics
-    update-plots
-  ]
-  if ticks = (max-iterations - 1) [
-      update-ui-metrics
-    update-plots
-  ]
-
+  
   tick
-end
 
+  ;; En RAPIDO y MIXTO actualizamos la visualizacion cada tick,
+  ;; porque no debería ser demasiado costoso.
+  if (evaluation-mode = "RAPIDO") or (evaluation-mode = "MIXTO") [
+    update-ui-metrics
+    update-dome-visualization
+    update-plots
+  ]
+
+  ;; En PRECISO actualizamos menos a menudo para no añadir coste.
+  if evaluation-mode = "PRECISO" [
+    if ticks mod 20 = 0 [
+      update-ui-metrics
+      update-dome-visualization
+      update-plots
+    ]
+  ]
+
+  ;; Refresco final asegurado
+  if ticks >= max-iterations [
+    update-ui-metrics
+    update-dome-visualization
+    update-plots
+  ]
+  
+end
 
 
 
@@ -1798,22 +2150,27 @@ end
     <monitor x="778" precision="17" y="154" height="60" fontSize="11" width="100" display="margen-f2">ui-best-margin-f2</monitor>
     <monitor x="664" precision="5" y="154" height="60" fontSize="11" width="100" display="f2">ui-best-f2</monitor>
     <monitor x="664" precision="5" y="92" height="60" fontSize="11" width="100" display="f1">ui-best-f1</monitor>
-    <monitor x="664" precision="5" y="20" height="60" fontSize="11" width="100" display="peso-real">ui-best-weight</monitor>
     <monitor x="725" precision="5" y="347" height="60" fontSize="11" width="100" display="g-best-val">g-best-val</monitor>
-    <slider x="426" step="1" y="87" max="100" display="population-size" height="33" min="1" direction="Horizontal" default="8.0" variable="population-size" width="174" sizeVersion="0"></slider>
+    <slider x="426" step="1" y="87" max="100" display="population-size" height="33" min="1" direction="Horizontal" default="22.0" variable="population-size" width="174" sizeVersion="0"></slider>
     <slider x="451" step="0.5" y="308" max="4.0" display="csa-alpha" height="33" min="2.5" direction="Horizontal" default="3.5" variable="csa-alpha" width="174" sizeVersion="0"></slider>
     <slider x="451" step="0.05" y="228" max="1" display="csa-p1" height="33" min="0.25" direction="Horizontal" default="0.85" variable="csa-p1" width="174" sizeVersion="0"></slider>
     <slider x="451" step="0.05" y="268" max="1.5" display="csa-p2" height="33" min="0.5" direction="Horizontal" default="0.85" variable="csa-p2" width="174" sizeVersion="0"></slider>
     <slider x="452" step="0.01" y="186" max="0.15" display="csa-Pp" height="33" min="0.05" direction="Horizontal" default="0.1" variable="csa-Pp" width="174" sizeVersion="0"></slider>
     <slider x="451" step="0.5" y="350" max="4.0" display="csa-beta" height="33" min="2.5" direction="Horizontal" default="3.0" variable="csa-beta" width="174" sizeVersion="0"></slider>
-    <slider x="426" step="10" y="130" max="1000" display="max-iterations" height="33" min="10" direction="Horizontal" default="100.0" variable="max-iterations" width="174" sizeVersion="0"></slider>
-    <chooser x="382" y="15" height="60" variable="accurate-rotations" current="4" width="250" display="accurate-rotations">
+    <slider x="426" step="10" y="130" max="1000" display="max-iterations" height="33" min="10" direction="Horizontal" default="750.0" variable="max-iterations" width="174" sizeVersion="0"></slider>
+    <chooser x="382" y="15" height="60" variable="accurate-rotations" current="0" width="250" display="accurate-rotations">
       <choice type="double" value="500.0"></choice>
       <choice type="double" value="1000.0"></choice>
       <choice type="double" value="3000.0"></choice>
       <choice type="double" value="5000.0"></choice>
       <choice type="double" value="12000.0"></choice>
       <choice type="double" value="20000.0"></choice>
+    </chooser>
+    <monitor x="781" precision="5" y="19" height="60" fontSize="11" width="100" display="peso-real">ui-best-weight</monitor>
+    <chooser x="636" y="15" height="60" variable="evaluation-mode" current="1" width="116" display="evaluation-mode">
+      <choice type="string" value="RAPIDO"></choice>
+      <choice type="string" value="MIXTO"></choice>
+      <choice type="string" value="PRECISO"></choice>
     </chooser>
   </widgets>
   <info>## ¿QUÉ ES ESTO?
@@ -1849,14 +2206,26 @@ En la interfaz puedes modificar:
 - **csa-alpha** — parámetro del decaimiento adaptativo de μ(t)
 - **csa-beta** — parámetro del decaimiento adaptativo de μ(t)
 
-**accurate-rotations** — controla el número de iteraciones de Jacobi usado en la evaluación precisa del diseño.
+**accurate-rotations** — controla el número de iteraciones de Jacobi usado cuando el modelo realiza una evaluación precisa.
 
-- **3000** → más rápido, pero menos fiable cerca de la frontera de factibilidad
-- **5000** → compromiso rápido
-- **12000** → equilibrio entre velocidad y precisión
-- **20000** → evaluación más lenta, pero más fiable para resultados finales
+- **500 – 1000** → vista previa muy rápida, no fiable para resultados finales
+- **2000 – 3000** → evaluación rápida para pruebas
+- **5000** → compromiso intermedio
+- **12000** → buena precisión para pruebas serias
+- **20000** → validación más estricta para resultados finales
+
 
 Se recomienda usar **12000** para pruebas normales y **20000** para validar o generar resultados finales.
+
+**evaluation-mode** — permite elegir el nivel de fidelidad usado durante la optimización:
+
+- **RAPIDO** — usa una función simplificada muy barata. Sirve para ver el comportamiento del CSA en tiempo real, pero no debe usarse para validar resultados finales.
+- **MIXTO** — usa un modelo aproximado basado en peso, rigidez y masa. Es más realista que el modo rápido, pero mucho más ágil que el cálculo modal completo.
+- **PRECISO** — usa el modelo estructural completo con cálculo modal. Es el modo más fiable, pero también el más costoso computacionalmente.
+
+Se recomienda usar **RAPIDO** para demostraciones, **MIXTO** para pruebas intermedias y **PRECISO** para resultados finales.
+
+
 
 ---
 
@@ -1898,6 +2267,46 @@ Y para el problema físico:
 
 ---
 
+
+---
+
+## DIFERENCIA ENTRE FITNESS Y PESO
+
+El **peso-real** es una magnitud física del diseño. Representa el peso estructural calculado a partir de las áreas de las 120 barras.
+
+El **fitness** es el valor que utiliza el CSA para decidir qué diseño es mejor. Por tanto, el fitness puede incluir penalizaciones o aproximaciones y no siempre coincide con el peso.
+
+### En modo RAPIDO
+
+El fitness se calcula con una función simplificada, pensada para que el algoritmo pueda ejecutarse de forma interactiva.  
+En este modo, el fitness no representa directamente el peso real ni valida las restricciones dinámicas.
+
+### En modo MIXTO
+
+El fitness combina el peso real con una penalización basada en frecuencias aproximadas.  
+Estas frecuencias se estiman mediante un modelo simplificado de rigidez y masa, sin resolver el problema modal completo.
+
+Por eso en modo MIXTO el fitness puede ser distinto del peso.
+
+### En modo PRECISO
+
+El fitness se calcula como:
+
+**fitness = peso real + penalización por incumplir frecuencias**
+
+Si el diseño cumple:
+
+- **f1 ≥ 9 Hz**
+- **f2 ≥ 11 Hz**
+
+entonces la penalización es cero y el fitness coincide con el peso real.
+
+En resumen:
+
+- **peso-real** → peso físico del diseño
+- **fitness** → criterio interno de optimización usado por el CSA
+
+
 ## ¿QUÉ MUESTRAN LOS MONITORES?
 
 ### Estado del algoritmo
@@ -1924,6 +2333,51 @@ entonces el mejor diseño actual cumple las restricciones dinámicas.
 
 ---
 
+---
+
+## ¿QUÉ MUESTRA LA VENTANA 3D?
+
+La ventana 3D muestra una representación simplificada del **domo de 120 barras** asociado al mejor diseño encontrado hasta el momento.
+
+### Nodos y barras
+
+- Los **nodos** del domo se muestran como puntos.
+- Las **barras** se muestran como enlaces entre nodos.
+- La forma representada corresponde a la geometría del benchmark del domo de 120 barras.
+
+### Colores de las barras
+
+El color de cada barra depende del área asignada al grupo al que pertenece:
+
+- **Azul / celeste** — área relativamente baja
+- **Verde** — área media-baja
+- **Naranja** — área media-alta
+- **Rojo** — área alta
+
+Esto permite ver visualmente qué zonas del domo están siendo reforzadas por el algoritmo.
+
+### Grosor de las barras
+
+El grosor de cada barra también depende del área del grupo:
+
+- barras finas → menor área
+- barras gruesas → mayor área
+
+Por tanto, cuando el algoritmo modifica el mejor diseño global, la representación 3D cambia de color y grosor para reflejar la evolución de las áreas `A1 ... A7`.
+
+### Etiqueta 3D
+
+La etiqueta flotante muestra información resumida del mejor diseño actual:
+
+- **Fitness CSA**
+- **Peso**
+- **f1**
+- **f2**
+
+En los modos **RAPIDO** y **MIXTO**, las frecuencias mostradas son aproximadas.  
+En el modo **PRECISO**, las frecuencias proceden del cálculo modal completo.
+
+
 ## ¿QUÉ MUESTRA EL GRÁFICO?
 
 El gráfico de **Convergencia** muestra la evolución del **mejor fitness** a lo largo de las iteraciones.
@@ -1932,8 +2386,6 @@ El gráfico de **Convergencia** muestra la evolución del **mejor fitness** a lo
 - Si la curva se aplana, el algoritmo está convergiendo o estancándose.
 
 ---
-
-## ¿CÓMO INTERPRETAR UN BUEN RESULTADO?
 
 Un buen resultado debe tener:
 
@@ -1944,6 +2396,8 @@ Un buen resultado debe tener:
 - **factible = SI**
 
 En general, un diseño con menor peso pero que no cumpla frecuencias **no es válido**.
+
+Los resultados obtenidos en modo **RAPIDO** o **MIXTO** deben interpretarse como aproximaciones. Para validar un resultado final se recomienda usar el modo **PRECISO**.
 
 ---
 
@@ -1969,8 +2423,10 @@ Después de cada fase, solo se acepta una nueva posición si mejora realmente la
 - Este problema es **costoso computacionalmente**, porque cada evaluación implica análisis estructural y cálculo modal.
 - Las corridas largas suelen producir mejores resultados.
 - El rendimiento depende especialmente de:
-  -- `population-size`
-  -- `max-iterations`
+  - `population-size`
+  - `max-iterations`
+  - `evaluation-mode`
+  - `accurate-rotations`
   - y de los parámetros del CSA
 
 ---

@@ -11,6 +11,9 @@
 ;Slider density densidad del material, en lb/in³
 
 breed [ particles particle ]
+breed [ struct-nodes struct-node ]
+undirected-link-breed [ bars bar ]
+
 
 globals [
   g-best-vars          ;; mejor solucion global: lista de 16 variables
@@ -49,6 +52,10 @@ globals [
   
   benchmark-72bar-design
   benchmark-72bar-weight
+  
+  display-load-case
+  geom-scale
+  deformation-scale
 
 ]
 
@@ -58,6 +65,178 @@ particles-own [
   p-best-val           ;; mejor fitness personal
   current-val          ;; fitness actual
 ]
+
+
+struct-nodes-own [
+  sn-id
+  x0
+  y0
+  z0
+]
+
+
+;; VISUALIZACION
+
+to setup-3d-view
+  ask struct-nodes [ die ]
+  ask bars [ die ]
+
+  ;; crear nodos
+  let i 0
+  while [i < length node-coords] [
+    let xyz item i node-coords
+    create-struct-nodes 1 [
+      set sn-id (i + 1)
+      set x0 item 0 xyz
+      set y0 item 1 xyz
+      set z0 item 2 xyz
+
+      setxyz (geom-scale * (x0 - 60))
+             (geom-scale * (y0 - 60))
+             (geom-scale * z0 )
+
+
+      set size 2
+      set color white
+
+      if member? sn-id support-node-ids [ set color blue ]
+      if member? sn-id top-node-ids [ set color yellow ]
+      
+      
+     
+set label ""
+
+if member? sn-id support-node-ids [
+  set color blue
+  set label (word "N" sn-id)
+  set label-color white
+]
+
+if member? sn-id top-node-ids [
+  set color yellow
+  set label (word "N" sn-id)
+  set label-color white
+]
+
+
+    ]
+    set i i + 1
+  ]
+
+  ;; crear barras
+  let m 0
+  while [m < length member-connectivity] [
+    let conn item m member-connectivity
+    let ni first conn
+    let nj last conn
+
+    let n1 one-of struct-nodes with [sn-id = ni]
+    let n2 one-of struct-nodes with [sn-id = nj]
+
+    ask n1 [
+      create-bars-with (turtle-set n2) [
+        set color gray
+      ]
+    ]
+
+    set m m + 1
+  ]
+  
+  
+  create-struct-nodes 1 [
+    setxyz 0 0 8
+    set color white
+    set size 0
+    set sn-id -1
+  ]
+
+  let peso (compute-real-weight g-best-vars)
+
+  ask one-of struct-nodes with [sn-id = -1] [
+    set label (word "Peso=" precision peso 2)
+    set label-color white
+  ]
+
+end
+
+
+to-report stresses-for-case [design one-load-case]
+  let u solve-displacements-for-case design one-load-case
+  let result []
+  let i 0
+
+  while [i < length member-connectivity] [
+    let conn item i member-connectivity
+    let ni first conn
+    let nj last conn
+
+    set result lput (element-axial-stress u ni nj) result
+    set i i + 1
+  ]
+
+  report result
+end
+
+
+to-report stress-color [s]
+  let u abs(s) / stress-limit
+
+  if u < 0.5 [report green]
+  if u < 0.8 [report yellow]
+  if u <= 1 [report orange]
+  report red
+end
+
+to update-3d-view [design]
+  let load load-case-1
+  if display-load-case = 2 [ set load load-case-2 ]
+
+  let u (solve-displacements-for-case design load)
+  let stresses (stresses-for-case design load)
+  let areas (expand-design-to-members design)
+
+  ;; mover nodos (solo reales)
+  ask struct-nodes with [sn-id > 0] [
+    let dofs node-dof-indices sn-id
+    let ux item (item 0 dofs) u
+    let uy item (item 1 dofs) u
+    let uz item (item 2 dofs) u
+
+   
+    setxyz (geom-scale * ((x0 - 60) + deformation-scale * ux))
+           (geom-scale * ((y0 - 60) + deformation-scale * uy))
+           (geom-scale * (z0 + deformation-scale * uz))
+
+  ]
+
+  ;; barras
+  ask bars [
+    let m position self sort bars
+    let s item m stresses
+    let a item m areas
+
+    ;; mostrar solo algunas
+
+  ifelse member? m [0 19 39 59] [
+    set label (precision a 3)
+    set label-color white
+  ] [
+    set label ""
+  ]
+    
+    set color (stress-color s)
+  ]
+
+  ;; peso global (panel)
+  let peso (compute-real-weight design)
+
+  ask one-of struct-nodes with [sn-id = -1] [
+    set label (word "Peso=" precision peso 2)
+    set label-color white
+  ]
+end
+
+;; HASTA AQUI VISULACION
 
 
 
@@ -83,9 +262,25 @@ to setup
   set debug-every 10
   set last-printed-best 1.0E+20
   
- 
-  
+  set display-load-case 2
+  set geom-scale 0.05
+  set deformation-scale 5
+
+
+  setup-3d-view
+  update-3d-view g-best-vars
+
+  reset-perspective
+  setxyz 18 -28 18
+  facexyz 0 0 6
+
+
+
 end
+
+
+
+
 
 
 ;; 72-bar: 16 grupos y 64 secciones discretas entre 0.111 y 33.5 in
@@ -1211,7 +1406,8 @@ to initialize-particles
     set color red
     set shape "dot"
     set size 2
-
+    
+    set hidden? true
   ]
 end
 
@@ -1535,6 +1731,7 @@ to go
   ]
 
   update-personal-global-best
+  update-3d-view g-best-vars
   update-convergence-plot
   maybe-print-debug
 
@@ -1642,6 +1839,8 @@ b) Movimiento en espiral
 Se aplica un movimiento en espiral logarítmica alrededor de la mejor solución, simulando la maniobra de caza con red de burbujas.
 Cuando el parámetro A es mayor que 1 en valor absoluto, el algoritmo entra en fase de exploración, moviéndose hacia soluciones aleatorias de la población.
 Además, dado que el problema es discreto, cada nueva solución se redondea a la sección comercial más cercana permitida.
+
+En la ventana 3D se muestra la estructura espacial de 72 barras correspondiente al mejor diseño encontrado por el algoritmo en cada iteración. La forma de la estructura se actualiza durante la ejecución para visualizar la evolución del proceso de optimización. Las barras cambian de color según su nivel de tensión respecto al límite admisible: verde indica baja solicitación, amarillo una solicitación intermedia, naranja una barra cercana al límite y rojo una barra que supera el límite permitido. Además, se muestran el peso total actual de la estructura y algunas etiquetas en barras representativas con su número y área de sección, permitiendo observar cómo el algoritmo va modificando el diseño para reducir el peso manteniendo las restricciones estructurales.
 
 ## ¿CÓMO USAR EL MODELO?
 En el área de interfaz se encuentran los siguientes controles:

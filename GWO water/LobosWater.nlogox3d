@@ -111,7 +111,7 @@ to setup-canal-view
   clear-drawing
 
   ;; ------------------------------------------------
-  ;; CANAL PRINCIPAL (desplazado hacia la izquierda)
+  ;; CANAL PRINCIPAL 
   ;; ------------------------------------------------
   ask patches with [
     pzcor = 0 and
@@ -469,7 +469,7 @@ to update-canal-view
     set label-color white
   ]
   
-  set-canal-camera
+;;  set-canal-camera
 end
 
 
