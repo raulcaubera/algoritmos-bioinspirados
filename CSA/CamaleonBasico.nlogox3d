@@ -8,23 +8,35 @@ breed [ points point ]       ;; puntos para visualizar la superficie (malla 3D)
 breed [ particles particle ] ;; agentes camaleones que exploran el espacio
 
 globals [
-  g-best-x          ;; mejor X global encontrada
-  g-best-y          ;; mejor Y global encontrada
-  g-best-val        ;; mejor fitness global
-  true-best-patch   ;; (paisaje aleatorio) parche con mayor elevación
+  g-best-vars
+  g-best-val
+  true-best-patch
+
+  number-of-groups
+  lower-bounds
+  upper-bounds
+
+  ;; parámetros CSA
+  csa-c1
+  csa-c2
+  csa-gamma
+  
 ]
 
 particles-own [
-  vx                ;; velocidad acumulada en X — proyección de lengua (Fase 3)
-  vy                ;; velocidad acumulada en Y — proyección de lengua (Fase 3)
-  p-best-x          ;; mejor X personal (Pi)
-  p-best-y          ;; mejor Y personal (Pi)
-  p-best-val        ;; mejor fitness personal
+  vars
+  vel
+  p-best-vars 
+  p-best-val
+  current-val
 ]
 
 patches-own [
   elevation         ;; fitness del parche (visualización / paisaje aleatorio)
 ]
+
+
+
 
 ; ----------------------------------------------------------
 ; FUNCIÓN OBJETIVO: ESFERA  f(x,y) = x² + y²  (minimizar)
@@ -33,11 +45,14 @@ to-report objective-function [x y]
   report (x ^ 2 + y ^ 2)
 end
 
+
+
 ; ----------------------------------------------------------
 ; SETUP
 ; ----------------------------------------------------------
 to setup
   clear-all
+  setup-design-space
   ask patches [ set elevation 0 ]
 
   ifelse random-search-space
@@ -49,13 +64,35 @@ to setup
   set-observer-position
 
   ;; Inicializar mejor global coherente con el modo de optimización
-  ifelse random-search-space
-  [ ask max-one-of particles [p-best-val]
-    [ set g-best-val p-best-val  set g-best-x p-best-x  set g-best-y p-best-y ] ]
-  [ ask min-one-of particles [p-best-val]
-    [ set g-best-val p-best-val  set g-best-x p-best-x  set g-best-y p-best-y ] ]
+  if random-search-space [
+    let best one-of max-n-of 1 particles [p-best-val]
+    set g-best-vars [p-best-vars] of best
+    set g-best-val [p-best-val] of best 
+  ]
 
+  if not random-search-space [
+    let best min-one-of particles [p-best-val]
+    set g-best-vars [p-best-vars] of best
+    set g-best-val [p-best-val] of best
+  ]
+  
   reset-ticks
+end
+
+
+to setup-design-space
+  set number-of-groups 2
+
+  ;; dominio del plano
+  set lower-bounds (list min-pxcor min-pycor)
+  set upper-bounds (list max-pxcor max-pycor)
+
+  ;; parámetros CSA internos fijos
+  ;; Los parámetros csa-Pp, csa-p1, csa-p2, csa-alpha y csa-beta
+  ;; se leen desde sliders de la interfaz.
+  set csa-c1 1.75
+  set csa-c2 1.75
+  set csa-gamma 1.0
 end
 
 ; ----------------------------------------------------------
@@ -89,6 +126,74 @@ to-report get-elevation
   [ report objective-function xcor ycor ]
 end
 
+;; Evalúa un diseño [x y].
+;; En modo esfera minimiza x^2 + y^2.
+;; En modo paisaje aleatorio maximiza elevation.
+to-report evaluate-design [design]
+  let x item 0 design
+  let y item 1 design
+
+  if random-search-space [
+    let px int x
+    let py int y
+    report [elevation] of patch px py 0
+  ]
+
+  report objective-function x y
+end
+
+
+;; Devuelve true si a es mejor que b.
+;; En paisaje aleatorio se maximiza.
+;; En esfera se minimiza.
+to-report better-than? [a b]
+  ifelse random-search-space
+  [ report a > b ]
+  [ report a < b ]
+end
+
+
+;; Copia segura de un diseño [x y].
+to-report copy-design [design]
+  if (not is-list? design) or (length design != 2) [
+    report []
+  ]
+
+  report (list (item 0 design) (item 1 design))
+end
+
+to-report valid-design-list? [x]
+  if not is-list? x [ report false ]
+  if length x != number-of-groups [ report false ]
+  report true
+end
+
+to-report vec-add [a b]
+  report (map [[x y] -> x + y] a b)
+end
+
+to-report vec-sub [a b]
+  report (map [[x y] -> x - y] a b)
+end
+
+to-report vec-clip [a low high]
+  report (map [[x lo hi] -> max list lo (min list x hi)] a low high)
+end
+
+;; Sincroniza vars = [x y] con la posición visible 3D de la partícula.
+to sync-particle-visual-state
+  setxy (item 0 vars) (item 1 vars)
+
+  let z-elev evaluate-design vars
+  let max-elev max [elevation] of patches
+
+  if max-elev = 0 [
+    set max-elev 1
+  ]
+
+  set zcor (z-elev / max-elev) * max-pzcor
+end
+
 ; ----------------------------------------------------------
 ; MALLA / SUPERFICIE 3D
 ; ----------------------------------------------------------
@@ -105,19 +210,25 @@ end
 ; ----------------------------------------------------------
 to initialize-particles
   create-particles population-size [
-    setxy random-xcor random-ycor
 
-    set p-best-x xcor
-    set p-best-y ycor
+    ;; diseño inicial = [x y]
+    set vars (list random-xcor random-ycor)
 
-    let z-elev get-elevation
-    let max-elev max [elevation] of patches
-    set zcor (z-elev / max-elev) * max-pzcor
-    set p-best-val z-elev
+    ;; velocidad inicial = [vx vy]
+    set vel (list
+      ((random-float 1.0) - 0.5)
+      ((random-float 1.0) - 0.5)
+    )
 
-    ;; Velocidad inicial de lengua pequeña y aleatoria
-    set vx random-normal 0 0.5
-    set vy random-normal 0 0.5
+    ;; fitness inicial
+    set current-val evaluate-design vars
+
+    ;; mejor personal inicial = estado inicial
+    set p-best-vars copy-design vars
+    set p-best-val current-val
+
+    ;; posición visual 3D
+    sync-particle-visual-state
 
     set color red
     set shape "dot"
@@ -130,126 +241,259 @@ end
 ; ----------------------------------------------------------
 to update-personal-global-best
   ask particles [
-    let f get-elevation
-    if (random-search-space and f > p-best-val)
-       or ((not random-search-space) and f < p-best-val)
-    [ set p-best-val f  set p-best-x xcor  set p-best-y ycor ]
+    let f evaluate-design vars
+    set current-val f
+
+    if better-than? current-val p-best-val [
+      set p-best-val current-val
+      set p-best-vars copy-design vars
+    ]
   ]
 
-  ifelse random-search-space
-  [ ask max-one-of particles [p-best-val]
-    [ if p-best-val > g-best-val
-      [ set g-best-val p-best-val  set g-best-x p-best-x  set g-best-y p-best-y ] ] ]
-  [ ask min-one-of particles [p-best-val]
-    [ if p-best-val < g-best-val
-      [ set g-best-val p-best-val  set g-best-x p-best-x  set g-best-y p-best-y ] ] ]
+  if any? particles [
+    let best-particle nobody
+
+    ifelse random-search-space
+    [ set best-particle max-one-of particles [p-best-val] ]
+    [ set best-particle min-one-of particles [p-best-val] ]
+
+    set g-best-vars copy-design ([p-best-vars] of best-particle)
+    set g-best-val [p-best-val] of best-particle
+  ]
 end
 
-; ==========================================================
-; BUCLE PRINCIPAL — CSA
-;
-; Mapeo de sliders a parámetros CSA:
-;   Pp                          → probabilidad de exploración (Fase 1)
-;   mu-max / mu-min             → rango del paso adaptativo μ(t)
-;   max-iterations              → iteraciones para el decaimiento de μ
-;   particle-inertia            → amortiguación de velocidad de lengua (Fase 3)
-;   attraction-to-personal-best → ganancia hacia Pi (Fases 1 y 3)
-;   attraction-to-global-best   → ganancia hacia G  (Fase 3)
-;   particle-speed-limit        → límite de velocidad de lengua
-; ==========================================================
-to go
+to-report mu-paper [iter-num max-iter]
+  let ratio (iter-num / max-iter)
+  report (csa-gamma * exp ( - ((csa-alpha * ratio) ^ csa-beta) ))
+end
 
-  ;; 1) Actualizar mejores con posiciones actuales
-  update-personal-global-best
+to-report omega-paper [iter-num max-iter]
+  report (1 - (iter-num / max-iter))
+end
 
-  ;; 2) μ(t): decaimiento lineal exploración → explotación
-  ;;    Usa max-iterations como horizonte de decaimiento
-  let tau (ticks / max-iterations)
-  if tau > 1 [ set tau 1 ]
-  let mu (mu-max - (mu-max - mu-min) * tau)
+to-report accel-paper [iter-num]
+  let a (2590 * (1 - (1 / (iter-num + 1))))
+  if a < 1 [
+    set a 1
+  ]
+  report a
+end
 
-  ;; 3) CSA por partícula: Percepción → Rotación → Caza
-  ask particles [
+to-report csa-search-step [x pbest gbest iter-num max-iter]
+  if not valid-design-list? x [
+    report (list random-xcor random-ycor)
+  ]
 
-    ifelse trace-mode [ pen-down ] [ pen-up ]
+  if not valid-design-list? pbest [
+    set pbest copy-design x
+  ]
 
-    ;; ── Fase 1: Percepción / Búsqueda de presa ───────────────
-    ;; Con prob. Pp → exploración aleatoria modulada por μ(t)
-    ;; Con prob. 1-Pp → paso normalizado hacia Pi o G (50/50)
-    ifelse (random-float 1.0 < Pp)
-    [
-      ;; Exploración: vector uniforme en [-1,1] × μ
-      let rx (random-float 2 - 1)
-      let ry (random-float 2 - 1)
-      setxy (xcor + mu * attraction-to-personal-best * rx)
-            (ycor + mu * attraction-to-personal-best * ry)
-    ]
-    [
-      ifelse (random-float 1.0 < 0.5)
-      [ ;; Movimiento normalizado hacia mejor personal (Pi)
-        let dxp (p-best-x - xcor)
-        let dyp (p-best-y - ycor)
-        let dp sqrt (dxp * dxp + dyp * dyp)
-        if dp > 0 [
-          setxy (xcor + mu * attraction-to-personal-best * dxp / dp)
-                (ycor + mu * attraction-to-personal-best * dyp / dp)
-        ]
-      ]
-      [ ;; Movimiento normalizado hacia mejor global (G)
-        let dxg (g-best-x - xcor)
-        let dyg (g-best-y - ycor)
-        let dg sqrt (dxg * dxg + dyg * dyg)
-        if dg > 0 [
-          setxy (xcor + mu * attraction-to-personal-best * dxg / dg)
-                (ycor + mu * attraction-to-personal-best * dyg / dg)
-        ]
-      ]
-    ]
+  if not valid-design-list? gbest [
+    set gbest copy-design pbest
+  ]
 
-    ;; ── Fase 2: Rotación ocular (visión 360°) ────────────────
-    ;; Incondicional — todos los agentes en cada tick
-    ;; heading + forward da giro suave y direccional
-    let theta ((random-float (2 * pi)) - pi)
-    let eye-step (mu * 0.5 * (0.5 + random-float 0.5))
-    set heading (heading + theta * (180 / pi))
-    forward eye-step
+  let mu mu-paper iter-num max-iter
+  let result []
+  let j 0
 
-    ;; ── Fase 3: Caza / Proyección de la lengua ───────────────
-    ;; Velocidad acumulada con amortiguación (momentum)
-    ;; Atrae simultáneamente a Pi (r1) y G (r2) con pesos aleatorios
-    ;; independientes → doble atracción + inercia = convergencia
+  while [j < length x] [
+    let xj item j x
+    let pj item j pbest
+    let gj item j gbest
+    let lj item j lower-bounds
+    let uj item j upper-bounds
+
     let r1 random-float 1.0
     let r2 random-float 1.0
-    let ax (attraction-to-global-best * (r1 * (p-best-x - xcor) + r2 * (g-best-x - xcor)) / 2)
-    let ay (attraction-to-global-best * (r1 * (p-best-y - ycor) + r2 * (g-best-y - ycor)) / 2)
+    let r3 random-float 1.0
+    let ri random-float 1.0
 
-    set vx (particle-inertia * vx + ax)
-    set vy (particle-inertia * vy + ay)
+    let sign-dir 1
+    if random-float 1.0 < 0.5 [
+      set sign-dir -1
+    ]
 
-    ;; Limitar velocidad de lengua
-    if (vx >  particle-speed-limit) [ set vx  particle-speed-limit ]
-    if (vx < (0 - particle-speed-limit)) [ set vx (0 - particle-speed-limit) ]
-    if (vy >  particle-speed-limit) [ set vy  particle-speed-limit ]
-    if (vy < (0 - particle-speed-limit)) [ set vy (0 - particle-speed-limit) ]
+    let new-xj xj
 
-    ;; Aplicar proyección de lengua
-    setxy (xcor + vx) (ycor + vy)
+    ifelse ri >= csa-Pp
+    [
+      set new-xj (xj + (csa-p1 * (pj - gj) * r2) + (csa-p2 * (gj - xj) * r1))
+    ]
+    [
+      set new-xj (xj + mu * (uj - lj) * r3 * sign-dir)
+    ]
 
-    ;; ── Corrección de límites ─────────────────────────────────
-    if xcor > max-pxcor [ set xcor max-pxcor ]
-    if xcor < min-pxcor [ set xcor min-pxcor ]
-    if ycor > max-pycor [ set ycor max-pycor ]
-    if ycor < min-pycor [ set ycor min-pycor ]
+    if new-xj < lj [ set new-xj lj ]
+    if new-xj > uj [ set new-xj uj ]
 
-    ;; ── Actualizar altura 3D para visualización ───────────────
-    let z-elev get-elevation
-    let max-elev max [elevation] of patches
-    set zcor (z-elev / max-elev) * max-pzcor
+    set result lput new-xj result
+    set j j + 1
   ]
 
-  if not trace-mode [ clear-drawing ]
+  report result
+end
+
+to-report csa-eye-rotation-step [x-old x-search]
+  let d length x-old
+  if d < 2 [
+    report x-search
+  ]
+
+  let i random d
+  let j random d
+
+  while [j = i] [
+    set j random d
+  ]
+
+  let r random-float 1.0
+  let sign-dir 1
+
+  if random-float 1.0 < 0.5 [
+    set sign-dir -1
+  ]
+
+  let theta (r * sign-dir * 180)
+
+  let yc vec-sub x-search x-old
+
+  let yi item i yc
+  let yj item j yc
+
+  let new-yi ((yi * cos theta) - (yj * sin theta))
+  let new-yj ((yi * sin theta) + (yj * cos theta))
+
+  let yc-rot replace-item i yc new-yi
+  set yc-rot replace-item j yc-rot new-yj
+
+  let rotated vec-add x-old yc-rot
+
+  report vec-clip rotated lower-bounds upper-bounds
+end
+
+to-report csa-tongue-step [x-current pbest gbest old-vel iter-num max-iter]
+  let omega omega-paper iter-num max-iter
+  let a accel-paper iter-num
+
+  let new-pos []
+  let new-vel []
+
+  let j 0
+  while [j < length x-current] [
+    let xj item j x-current
+    let pj item j pbest
+    let gj item j gbest
+    let v-old item j old-vel
+
+    let r1 random-float 1.0
+    let r2 random-float 1.0
+
+    let v-new ((omega * v-old) +
+               (csa-c1 * (gj - xj) * r1) +
+               (csa-c2 * (pj - xj) * r2))
+
+    let x-new (xj + (((v-new * v-new) - (v-old * v-old)) / (2 * a)))
+
+    let lj item j lower-bounds
+    let uj item j upper-bounds
+
+    if x-new < lj [ set x-new lj ]
+    if x-new > uj [ set x-new uj ]
+
+    set new-pos lput x-new new-pos
+    set new-vel lput v-new new-vel
+
+    set j j + 1
+  ]
+
+  report (list new-pos new-vel)
+end
+
+to csa-greedy-move [candidate-vars candidate-val candidate-vel]
+  if better-than? candidate-val current-val [
+    set vars copy-design candidate-vars
+    set current-val candidate-val
+    set vel candidate-vel
+  ]
+end
+
+
+; ==========================================================
+; BUCLE PRINCIPAL — CSA PAPER-FAITHFUL
+;
+; Parámetros principales:
+;   csa-Pp          → probabilidad de usar la rama guiada/exploratoria
+;   csa-p1          → peso asociado al mejor personal en la fase de búsqueda
+;   csa-p2          → peso asociado al mejor global en la fase de búsqueda
+;   csa-alpha       → controla el decaimiento de μ(t)
+;   csa-beta        → controla el decaimiento de μ(t)
+;   max-iterations  → horizonte temporal del algoritmo
+;
+; El motor usa representación vectorial:
+;   vars = [x y]
+;   vel  = [vx vy]
+; ==========================================================
+to go
+  if ticks >= max-iterations [
+    stop
+  ]
+
+  update-personal-global-best
+
+  let iter-num (ticks + 1)
+  let max-iter max-iterations
+
+  ask particles [
+
+    ifelse trace-mode
+    [ pen-down ]
+    [ pen-up ]
+
+    if not valid-design-list? p-best-vars [
+      set p-best-vars copy-design vars
+      set p-best-val current-val
+    ]
+
+    let x0 copy-design vars
+    let old-vel vel
+
+    ;; Paso 1: búsqueda / percepción
+    let x1 csa-search-step x0 p-best-vars g-best-vars iter-num max-iter
+    let f1 evaluate-design x1
+    csa-greedy-move x1 f1 old-vel
+
+    let x-after-search vars
+
+    ;; Paso 2: rotación ocular
+    let x2 csa-eye-rotation-step x0 x-after-search
+    let f2 evaluate-design x2
+    csa-greedy-move x2 f2 old-vel
+
+    let x-after-eye vars
+
+    ;; Paso 3: lengua
+    let tongue-output csa-tongue-step x-after-eye p-best-vars g-best-vars old-vel iter-num max-iter
+    let x3 item 0 tongue-output
+    let v3 item 1 tongue-output
+    let f3 evaluate-design x3
+    csa-greedy-move x3 f3 v3
+
+    ;; actualizar posición visible 3D
+    sync-particle-visual-state
+  ]
+
+  update-personal-global-best
+
+  if not trace-mode [
+    clear-drawing
+  ]
+
   tick
 end
+
+
+
+
 
 
 ;; funcion de prueba y experimentacion
@@ -260,9 +504,6 @@ to-report experimento [n semilla]
 
   setup
 
-  ;; Muy importante en CSA:
-  ;; el parámetro mu(t) usa max-iterations como horizonte
-  ;; de decaimiento, así que lo forzamos a n
   set max-iterations n
 
   repeat n [
@@ -274,10 +515,10 @@ to-report experimento [n semilla]
     "population-size" population-size
     "seed" semilla
     "ticks" ticks
-    "best-x" g-best-x
-    "best-y" g-best-y
+    "best-x" item 0 g-best-vars
+    "best-y" item 1 g-best-vars
     "best-val" g-best-val
-    "mean-val" mean [get-elevation] of particles
+    "mean-val" mean [current-val] of particles
   )
 end
 
@@ -306,10 +547,10 @@ to exportar-lote [poblaciones iteraciones semillas fichero]
           population-size ","
           s ","
           ticks ","
-          g-best-x ","
-          g-best-y ","
+          item 0 g-best-vars ","
+          item 1 g-best-vars ","
           g-best-val ","
-          mean [get-elevation] of particles
+          mean [current-val] of particles
         )
 
         ;; Mostrar también por consola para seguir el lote
@@ -340,14 +581,7 @@ end
     <switch x="26" y="228" height="33" on="false" variable="trace-mode" display="trace-mode" width="178" sizeVersion="0"></switch>
     <slider x="26" step="1" y="121" max="20" display="landscape-smoothness" height="33" min="4" direction="Horizontal" default="10.0" variable="landscape-smoothness" width="176" sizeVersion="0"></slider>
     <slider x="26" step="1" y="167" max="50" display="hills-number" height="33" min="1" direction="Horizontal" default="30.0" variable="hills-number" width="178" sizeVersion="0"></slider>
-    <slider x="381" step="1" y="30" max="100" display="population-size" height="33" min="1" direction="Horizontal" default="100.0" variable="population-size" width="174" sizeVersion="0"></slider>
-    <slider x="381" step="0.1" y="75" max="5.0" display="mu-max" height="33" min="0.1" direction="Horizontal" default="1.0" variable="mu-max" width="174" sizeVersion="0"></slider>
-    <slider x="381" step="0.01" y="115" max="1.0" display="mu-min" height="33" min="0.01" direction="Horizontal" default="0.1" variable="mu-min" width="174" sizeVersion="0"></slider>
-    <slider x="381" step="0.05" y="155" max="1.0" display="Pp" height="33" min="0.0" direction="Horizontal" default="0.1" variable="Pp" width="174" sizeVersion="0"></slider>
-    <slider x="381" step="10" y="195" max="1000" display="max-iterations" height="33" min="10" direction="Horizontal" default="500.0" variable="max-iterations" width="174" sizeVersion="0"></slider>
-    <slider x="381" step="0.05" y="235" max="1.0" display="particle-inertia" height="33" min="0.0" direction="Horizontal" default="0.7" variable="particle-inertia" width="174" sizeVersion="0"></slider>
-    <slider x="381" step="0.1" y="315" max="3.0" display="attraction-to-global-best" height="33" min="0.0" direction="Horizontal" default="1.5" variable="attraction-to-global-best" width="202" sizeVersion="0"></slider>
-    <slider x="381" step="0.5" y="355" max="10.0" display="particle-speed-limit" height="33" min="0.5" direction="Horizontal" default="3.0" variable="particle-speed-limit" width="174" sizeVersion="0"></slider>
+    <slider x="380" step="1" y="30" max="100" display="population-size" height="33" min="1" direction="Horizontal" default="200.0" variable="population-size" width="174" sizeVersion="0"></slider>
     <plot x="18" autoPlotX="true" yMax="10.0" autoPlotY="true" yAxis="fitness" y="306" xMin="0.0" height="200" legend="true" xMax="10.0" yMin="0.0" xAxis="iteración" display="CSA — Evolución del fitness" width="342" sizeVersion="0">
       <setup></setup>
       <update></update>
@@ -370,221 +604,391 @@ end
 [plot max [p-best-val] of particles]</update>
       </pen>
     </plot>
-    <slider x="381" step="0.1" y="277" max="3.0" display="attraction-to-personal-best" height="33" min="0.0" direction="Horizontal" default="1.0" variable="attraction-to-personal-best" width="203" sizeVersion="0"></slider>
+    <slider x="380" step="10" y="74" max="1000" display="max-iterations" height="33" min="10" direction="Horizontal" default="100.0" variable="max-iterations" width="174" sizeVersion="0"></slider>
+    <slider x="382" step="0.01" y="141" max="0.15" display="csa-Pp" height="33" min="0.0" direction="Horizontal" default="0.1" variable="csa-Pp" width="174" sizeVersion="0"></slider>
+    <slider x="382" step="0.1" y="305" max="5" display="csa-beta" height="33" min="0.5" direction="Horizontal" default="3.0" variable="csa-beta" width="174" sizeVersion="0"></slider>
+    <slider x="382" step="0.1" y="264" max="5" display="csa-alpha" height="33" min="0.5" direction="Horizontal" default="3.5" variable="csa-alpha" width="174" sizeVersion="0"></slider>
+    <slider x="382" step="0.05" y="223" max="2" display="csa-p2" height="33" min="0.0" direction="Horizontal" default="1.5" variable="csa-p2" width="174" sizeVersion="0"></slider>
+    <slider x="382" step="0.05" y="181" max="2" display="csa-p1" height="33" min="0.0" direction="Horizontal" default="0.25" variable="csa-p1" width="174" sizeVersion="0"></slider>
   </widgets>
   <info><![CDATA[## ¿QUÉ ES?
 
-El Algoritmo de Enjambre de Camaleones, CSA por sus siglas en inglés (*Chameleon Swarm Algorithm*), es un algoritmo de optimización metaheurístico inspirado en el comportamiento de los camaleones durante la búsqueda y captura de presas.
+Este modelo implementa el **Algoritmo de Enjambre de Camaleones**, CSA por sus siglas en inglés (*Chameleon Swarm Algorithm*), en **NetLogo 3D**.
 
-Este tipo de algoritmos se basa en poblaciones de agentes que exploran un espacio de búsqueda con el objetivo de encontrar la mejor solución posible para un problema. En este modelo, cada agente representa un camaleón que se desplaza por un paisaje de aptitud en busca del mejor valor de una función objetivo.
+El CSA es un algoritmo de optimización metaheurístico inspirado en el comportamiento de los camaleones durante la búsqueda y captura de presas. En este modelo, cada agente representa un camaleón que se desplaza por un espacio de búsqueda con el objetivo de encontrar la mejor solución posible.
+
+El modelo permite trabajar con dos tipos de espacio de búsqueda:
+
+1. **Función esfera**, donde el objetivo es minimizar:
+
+> f(x,y) = x² + y²
+
+El mínimo global se encuentra en:
+
+> x = 0, y = 0
+
+2. **Paisaje aleatorio**, donde el objetivo es encontrar la zona de mayor elevación del paisaje generado.
+
+En la función esfera, el algoritmo resuelve un problema de **minimización**.  
+En el paisaje aleatorio, el algoritmo resuelve un problema de **maximización**.
+
+---
+
+## INSPIRACIÓN BIOLÓGICA
 
 El CSA imita tres comportamientos característicos de los camaleones:
 
 * la percepción del entorno para localizar posibles presas,
+
 ![imagen](file:images/mov.jpg)
-* la rotación ocular, que les permite explorar visualmente el espacio,
+
+* la rotación ocular, que permite explorar visualmente el espacio,
+
 ![imagen](file:images/ojos.jpg)
+
 * y la proyección rápida de la lengua para capturar la presa.
+
 ![imagen](file:images/lengua.jpg)
 
+En este modelo, estos comportamientos se traducen en tres fases algorítmicas aplicadas sobre la posición de cada camaleón.
 
-En este modelo de NetLogo 3D, los camaleones se mueven sobre un espacio de búsqueda tridimensional. La altura del paisaje representa el valor de aptitud o fitness asociado a cada posición.
-
-Cuando se utiliza la función objetivo por defecto, el algoritmo intenta minimizar la función esfera:
-
-> f(x,y) = x² + y²
-
-El mínimo global de esta función se encuentra en el origen, es decir, en la posición:
-
-> x = 0, y = 0
-
-Por tanto, el objetivo del enjambre es desplazarse progresivamente hacia esa región del espacio de búsqueda.
-
-
+---
 
 ## ¿CÓMO TRABAJA?
 
-El algoritmo CSA trabaja mediante una población de camaleones que se desplazan por el espacio de búsqueda combinando exploración y explotación.
+El algoritmo trabaja con una población de camaleones. Cada camaleón representa una solución candidata del problema.
 
-La exploración permite que los camaleones busquen nuevas zonas del espacio, evitando concentrarse demasiado pronto en una única región.
+Cada solución se almacena como un vector:
 
-La explotación permite que los camaleones se acerquen a las mejores posiciones encontradas hasta el momento.
+> vars = [x y]
 
-Cada camaleón mantiene dos tipos de información importantes:
+Cada camaleón mantiene:
 
-* **Mejor posición personal**, llamada `Pi`, que representa la mejor posición encontrada por ese camaleón.
-* **Mejor posición global**, llamada `G`, que representa la mejor posición encontrada por todo el enjambre.
+* **posición actual**, `vars`
+* **velocidad**, `vel`
+* **mejor posición personal**, `p-best-vars`
+* **mejor valor personal**, `p-best-val`
 
-Durante cada iteración, los camaleones actualizan su posición mediante tres fases principales.
+Además, el enjambre mantiene:
+
+* **mejor posición global**, `g-best-vars`
+* **mejor valor global**, `g-best-val`
+
+Durante cada iteración, los camaleones actualizan su posición mediante tres fases consecutivas:
 
 ![imagen](file:images/diagrama.jpg)
 
-### Fase 1: Percepción o búsqueda de presa
+---
 
-En esta fase, cada camaleón decide si realiza un movimiento exploratorio aleatorio o si se desplaza hacia una buena solución conocida.
+## FASE 1: BÚSQUEDA O PERCEPCIÓN
 
-Con una probabilidad definida por el parámetro `Pp`, el camaleón realiza una exploración aleatoria. Esto le permite visitar nuevas regiones del espacio de búsqueda.
+En esta fase, cada camaleón genera una nueva posición candidata usando información de:
 
-Si no realiza exploración aleatoria, el camaleón se mueve hacia su mejor posición personal `Pi` o hacia la mejor posición global `G`.
+* su mejor posición personal,
+* la mejor posición global,
+* y una componente aleatoria de exploración.
 
-El tamaño del movimiento está controlado por el parámetro adaptativo `μ(t)`, que decrece linealmente a medida que avanza la simulación.
+El parámetro `csa-Pp` controla la probabilidad asociada a la rama exploratoria del algoritmo.
 
-Al inicio, `μ(t)` tiene un valor alto, favoreciendo movimientos amplios y exploración.
+Los parámetros `csa-p1` y `csa-p2` controlan la influencia relativa del mejor personal y del mejor global durante esta fase.
 
-Al final, `μ(t)` tiene un valor bajo, favoreciendo movimientos más pequeños y refinamiento de la solución.
+El tamaño del movimiento está regulado por un parámetro adaptativo `μ(t)`, que depende de:
 
+* `csa-alpha`
+* `csa-beta`
+* `max-iterations`
 
+Al principio de la ejecución, el algoritmo tiende a explorar más.  
+Conforme avanzan las iteraciones, el movimiento se vuelve más refinado.
 
+---
 
-### Fase 2: Rotación ocular
+## FASE 2: ROTACIÓN OCULAR
 
-Los camaleones poseen una visión muy amplia gracias al movimiento independiente de sus ojos. Para simular este comportamiento, en cada iteración el agente realiza un pequeño giro aleatorio y avanza una distancia corta.
+La fase de rotación ocular introduce una variación adicional en el desplazamiento del camaleón.
 
-Esta fase introduce variabilidad en el movimiento y ayuda a que los camaleones no sigan trayectorias completamente rígidas. Gracias a ello, el algoritmo puede explorar mejor el entorno y evitar en algunos casos quedar atrapado prematuramente en soluciones locales.
+En esta implementación, el desplazamiento se rota en el plano de búsqueda para generar una nueva posición candidata. Esto ayuda a diversificar la búsqueda y evita que las partículas sigan trayectorias demasiado rígidas.
 
+---
 
+## FASE 3: LENGUA O ATAQUE
 
-### Fase 3: Caza o proyección de la lengua
+La fase de lengua representa el movimiento de ataque hacia zonas prometedoras del espacio de búsqueda.
 
-La fase de caza representa el movimiento rápido de la lengua del camaleón hacia la presa.
+Cada camaleón actualiza una velocidad vectorial:
 
-En el modelo, esta fase se implementa mediante una velocidad acumulada en las coordenadas X e Y. Cada camaleón posee dos variables de velocidad:
+> vel = [vx vy]
 
-* `vx`, velocidad en el eje X.
-* `vy`, velocidad en el eje Y.
+La nueva velocidad depende de:
 
-Estas velocidades se actualizan teniendo en cuenta:
+* la velocidad anterior,
+* la atracción hacia la mejor posición personal,
+* la atracción hacia la mejor posición global,
+* y factores aleatorios.
 
-* la inercia anterior del movimiento,
-* la atracción hacia la mejor posición personal `Pi`,
-* la atracción hacia la mejor posición global `G`,
-* y varios factores aleatorios que introducen diversidad.
+Después se calcula una nueva posición candidata. Si esa posición mejora la solución actual, se acepta.
 
-La inercia permite que el camaleón mantenga parte de su movimiento anterior. La atracción hacia `Pi` y `G` favorece la convergencia hacia zonas prometedoras del espacio de búsqueda.
-
-Para evitar movimientos excesivamente grandes, la velocidad se limita mediante el parámetro `PARTICLE-SPEED-LIMIT`.
-
-Finalmente, el camaleón actualiza su posición y se recalcula su valor de fitness.
-
-
+---
 
 ## FUNCIÓN OBJETIVO Y ESPACIO DE BÚSQUEDA
 
-Por defecto, el modelo utiliza la función esfera:
+### Función esfera
+
+Cuando `random-search-space` está desactivado, el modelo utiliza la función esfera:
 
 > f(x,y) = x² + y²
 
-Esta función se utiliza habitualmente para probar algoritmos de optimización, ya que tiene un único mínimo global claramente definido en el origen.
+En este caso, el objetivo es minimizar el valor de la función.  
+Los mejores valores son los más cercanos a cero.
 
-En el modo normal, el algoritmo intenta minimizar esta función. Por ello, los mejores valores son aquellos más cercanos a cero.
+El comportamiento esperado es que los camaleones se desplacen progresivamente hacia el origen.
 
-Si se activa la opción `RANDOM-SEARCH-SPACE`, el modelo genera un paisaje aleatorio de elevaciones. En este caso, el objetivo cambia y el algoritmo busca las zonas de mayor elevación del paisaje.
+---
 
-Este modo permite observar el comportamiento de los camaleones en un espacio más irregular, con varias regiones atractivas, máximos locales y zonas de diferente dificultad.
+### Paisaje aleatorio
 
+Cuando `random-search-space` está activado, el modelo genera un paisaje aleatorio de elevaciones.
 
+En este modo, el objetivo cambia:
+
+> el algoritmo busca la zona de mayor elevación del paisaje.
+
+Este modo permite observar el comportamiento del CSA en un espacio irregular, con varios máximos locales y zonas de distinta dificultad.
+
+---
 
 ## ¿CÓMO USARLO?
 
-Pulse **SETUP** para inicializar el modelo. Esto crea el paisaje de búsqueda, coloca los camaleones aleatoriamente y calcula las mejores posiciones iniciales.
+1. Ajuste los parámetros de la interfaz.
+2. Pulse **SETUP CSA** para inicializar el modelo.
+3. Pulse **STEP by STEP** para ejecutar una única iteración.
+4. Pulse **EJECUTAR CSA** para ejecutar el algoritmo de forma continua.
 
-Si la opción `RANDOM-SEARCH-SPACE` está activada, cada vez que se pulse **SETUP** se generará un paisaje aleatorio diferente.
+Si `random-search-space` está activado, cada vez que se pulse **SETUP CSA** se generará un nuevo paisaje aleatorio.
 
-Pulse **GO** para ejecutar el algoritmo de forma continua.
+Los camaleones aparecen como puntos rojos sobre la superficie. Su posición representa la solución candidata actual.
 
-Si existe un botón de ejecución paso a paso, puede utilizarse para observar una única iteración del algoritmo cada vez.
+El interruptor `trace-mode` permite activar o desactivar el rastro de movimiento de los camaleones.
 
-Los camaleones aparecen como puntos rojos que se mueven sobre el paisaje de aptitud. Su altura en la vista 3D representa el valor de fitness correspondiente a la posición en la que se encuentran.
-
-El interruptor `TRACE-MODE` permite activar o desactivar el rastro de movimiento de los camaleones. Si está activado, se pueden observar las trayectorias seguidas por los agentes durante la búsqueda.
-
-
+---
 
 ## PARÁMETROS DEL MODELO
 
-El control deslizante `POPULATION-SIZE` determina el número de camaleones utilizados en la simulación.
+### Parámetros del espacio de búsqueda
 
-Una población pequeña puede converger más rápido, pero tiene más riesgo de quedarse atrapada en soluciones locales.
+**random-search-space**  
+Activa o desactiva el paisaje aleatorio.
 
-Una población grande mejora la exploración del espacio de búsqueda, aunque puede necesitar más iteraciones para converger.
+- Desactivado: se usa la función esfera.
+- Activado: se genera un paisaje aleatorio y se busca su máximo.
 
-El parámetro `Pp` controla la probabilidad de exploración aleatoria durante la fase de percepción.
+**landscape-smoothness**  
+Controla el suavizado del paisaje aleatorio. Valores más altos generan superficies más suaves.
 
-Valores bajos de `Pp` hacen que el algoritmo se centre más en explotar las mejores posiciones conocidas.
+**hills-number**  
+Número de elevaciones iniciales usadas para generar el paisaje aleatorio.
 
-Valores altos de `Pp` aumentan la exploración, pero pueden dificultar la convergencia si el movimiento aleatorio es excesivo.
+**trace-mode**  
+Activa o desactiva el rastro de las trayectorias de los camaleones.
 
-Los parámetros `MU-MAX` y `MU-MIN` definen el rango del paso adaptativo `μ(t)`.
+---
 
-`MU-MAX` controla el tamaño inicial del movimiento.
+### Parámetros del algoritmo
 
-`MU-MIN` controla el tamaño mínimo del movimiento en las últimas iteraciones.
+**population-size**  
+Número de camaleones utilizados en la simulación.
 
-El parámetro `MAX-ITERATIONS` indica el horizonte utilizado para reducir progresivamente `μ(t)`. A medida que aumentan los ticks, el valor de `μ(t)` disminuye desde `MU-MAX` hasta `MU-MIN`.
+Una población pequeña puede converger más rápido, pero explora peor el espacio.  
+Una población grande mejora la exploración, pero puede necesitar más tiempo.
 
-El parámetro `PARTICLE-INERTIA` controla cuánto se conserva de la velocidad anterior durante la fase de caza.
+**max-iterations**  
+Número máximo de iteraciones de la ejecución.
 
-Un valor alto produce movimientos más suaves y con más impulso.
+También se usa como horizonte temporal para el decaimiento del parámetro adaptativo `μ(t)`.
 
-Un valor bajo hace que los camaleones reaccionen más rápidamente a las mejores posiciones actuales.
+**csa-Pp**  
+Probabilidad asociada a la rama exploratoria del algoritmo.
 
-El parámetro `ATTRACTION-TO-PERSONAL-BEST` controla la atracción hacia la mejor posición personal de cada camaleón.
+Valores bajos favorecen la explotación de buenas soluciones conocidas.  
+Valores altos aumentan la exploración.
 
-El parámetro `ATTRACTION-TO-GLOBAL-BEST` controla la atracción hacia la mejor posición global encontrada por todo el enjambre.
+Valor recomendado:
 
-El parámetro `PARTICLE-SPEED-LIMIT` limita la velocidad máxima de la fase de proyección de la lengua, evitando desplazamientos demasiado bruscos.
+> csa-Pp = 0.10
 
+**csa-p1**  
+Peso asociado al mejor personal durante la fase de búsqueda.
 
+Valor recomendado para función esfera:
+
+> csa-p1 = 0.25
+
+**csa-p2**  
+Peso asociado al mejor global durante la fase de búsqueda.
+
+Valor recomendado para función esfera:
+
+> csa-p2 = 1.50
+
+**csa-alpha**  
+Parámetro que controla la forma del decaimiento de `μ(t)`.
+
+Valor recomendado:
+
+> csa-alpha = 3.5
+
+**csa-beta**  
+Parámetro que controla la forma del decaimiento de `μ(t)`.
+
+Valor recomendado:
+
+> csa-beta = 3.0
+
+---
+
+## PARÁMETROS RECOMENDADOS
+
+Para pruebas normales con la función esfera:
+
+- **population-size = 100**
+- **max-iterations = 500**
+- **csa-Pp = 0.10**
+- **csa-p1 = 0.25**
+- **csa-p2 = 1.50**
+- **csa-alpha = 3.5**
+- **csa-beta = 3.0**
+
+Para observar paisajes aleatorios:
+
+- **random-search-space = ON**
+- **hills-number = 30**
+- **landscape-smoothness = 10**
+- **population-size = 100**
+- **max-iterations = 500**
+
+---
+
+## ¿QUÉ MUESTRA LA VENTANA 3D?
+
+La ventana 3D muestra el espacio de búsqueda.
+
+### En modo esfera
+
+La superficie representa la función:
+
+> f(x,y) = x² + y²
+
+El objetivo es encontrar el punto más bajo de la superficie, situado en el origen.
+
+### En modo paisaje aleatorio
+
+La superficie representa un paisaje de elevaciones generado aleatoriamente.
+
+El objetivo es encontrar la zona más alta del paisaje.
+
+### Camaleones
+
+Los puntos rojos representan los camaleones.  
+Cada camaleón se mueve sobre el espacio de búsqueda según las reglas del CSA.
+
+Si `trace-mode` está activado, se muestran las trayectorias recorridas por los camaleones.
+
+---
+
+## ¿QUÉ MUESTRA EL GRÁFICO?
+
+El gráfico **CSA — Evolución del fitness** muestra la evolución del comportamiento del enjambre.
+
+El gráfico incluye tres curvas:
+
+* **media** — valor medio de los mejores personales de la población.
+* **mejor** — mejor valor global encontrado.
+* **peor** — peor valor personal dentro de la población.
+
+En la función esfera, valores más bajos indican mejores soluciones.
+
+En el paisaje aleatorio, el objetivo real es maximizar la elevación. Para mantener una interpretación visual similar, el gráfico puede representar el inverso del valor de elevación. Por eso, en ambos modos, una curva descendente indica mejora del algoritmo.
+
+---
+
+## ¿CÓMO INTERPRETAR UN BUEN RESULTADO?
+
+### En función esfera
+
+Un buen resultado debe tener:
+
+* `g-best-vars` cercano a `[0 0]`
+* `g-best-val` cercano a `0`
+
+Ejemplo de resultado bueno:
+
+> g-best-vars ≈ [0 0]  
+> g-best-val ≈ 0
+
+### En paisaje aleatorio
+
+Un buen resultado debe tener:
+
+* `g-best-val` cercano al máximo real del paisaje.
+* Los camaleones concentrados cerca de una zona alta de la superficie.
+
+Para comprobar el máximo real del paisaje puede usarse:
+
+> max [elevation] of patches
+
+Si `g-best-val` se acerca a ese valor, el algoritmo ha encontrado una zona muy buena del paisaje.
+
+---
 
 ## COSAS A TENER EN CUENTA
 
-Al comienzo de la simulación, los camaleones suelen moverse de forma más dispersa. Esto se debe a que el valor de `μ(t)` es alto y favorece la exploración del espacio.
+En la función esfera, el algoritmo suele converger rápidamente hacia el origen, porque la función tiene un único mínimo global.
 
-Conforme avanzan las iteraciones, `μ(t)` disminuye, los movimientos se hacen más pequeños y los camaleones tienden a concentrarse alrededor de las mejores posiciones encontradas.
+En paisajes aleatorios, el comportamiento puede ser más irregular, ya que pueden existir varios máximos locales. En estos casos, el enjambre puede converger hacia una zona localmente buena en lugar de alcanzar siempre el máximo global.
 
-En la función esfera, lo esperable es que los camaleones se aproximen progresivamente al origen, donde se encuentra el mínimo global.
+El equilibrio entre exploración y explotación depende principalmente de:
 
-En paisajes aleatorios, el comportamiento puede ser más irregular, ya que pueden existir varias zonas atractivas. En estos casos, el enjambre puede converger hacia un máximo local en lugar de encontrar la mejor zona global.
+* `population-size`
+* `max-iterations`
+* `csa-Pp`
+* `csa-p1`
+* `csa-p2`
+* `csa-alpha`
+* `csa-beta`
 
-Si la atracción hacia la mejor posición global es demasiado alta, los camaleones pueden converger demasiado rápido y perder diversidad.
+Una exploración demasiado baja puede hacer que el enjambre converja demasiado pronto.
 
-Si la exploración aleatoria es demasiado alta, el algoritmo puede tardar más en estabilizarse.
+Una exploración demasiado alta puede retrasar la convergencia.
 
-El equilibrio entre exploración y explotación depende principalmente de los parámetros `Pp`, `MU-MAX`, `MU-MIN`, `PARTICLE-INERTIA` y las ganancias de atracción.
-
-
+---
 
 ## REALICE PRUEBAS
 
-Pruebe a modificar `POPULATION-SIZE`.
+Pruebe a modificar `population-size`.
 
-Con pocos camaleones, el algoritmo suele ser más rápido, pero puede explorar peor el espacio de búsqueda.
+Con pocos camaleones, el algoritmo suele ser más rápido, pero puede explorar peor el espacio.
 
-Con más camaleones, la exploración mejora, aunque la simulación puede necesitar más tiempo para estabilizarse.
+Con más camaleones, la exploración mejora, aunque la ejecución puede necesitar más tiempo para estabilizarse.
 
-Pruebe a cambiar el valor de `Pp`.
+Pruebe a cambiar `csa-Pp`.
 
-Un valor bajo favorece la convergencia hacia las mejores posiciones conocidas.
+Un valor bajo favorece la explotación de soluciones conocidas.
 
-Un valor alto favorece la exploración de nuevas zonas.
+Un valor alto aumenta la exploración.
 
-Pruebe distintos valores de `MU-MAX` y `MU-MIN`.
+Pruebe distintos valores de `csa-p1` y `csa-p2`.
 
-Si `MU-MAX` es muy alto, los camaleones pueden realizar movimientos demasiado grandes al inicio.
+Estos parámetros modifican la influencia del mejor personal y del mejor global durante la búsqueda.
 
-Si `MU-MIN` es muy bajo, el ajuste final será más fino, pero puede ralentizarse la convergencia.
+Pruebe distintos valores de `csa-alpha` y `csa-beta`.
 
-Modifique `PARTICLE-INERTIA`.
+Estos parámetros modifican la evolución del parámetro adaptativo `μ(t)`.
 
-Valores altos producen movimientos más continuos.
+Active y desactive `trace-mode` para observar las trayectorias de los camaleones.
 
-Valores bajos hacen que los camaleones cambien de dirección con mayor facilidad.
+Active `random-search-space` para analizar cómo se comporta el algoritmo en paisajes más complejos y con múltiples máximos locales.
 
-Active y desactive `TRACE-MODE` para observar las trayectorias seguidas por los camaleones.
-
-También puede activar `RANDOM-SEARCH-SPACE` para analizar cómo se comporta el algoritmo en paisajes más complejos y con múltiples óptimos locales.
-
-
+---
 
 ## MODELOS RELACIONADOS
 
@@ -595,13 +999,13 @@ También puede activar `RANDOM-SEARCH-SPACE` para analizar cómo se comporta el 
 * Algoritmos de búsqueda local.
 * Métodos de ascenso o descenso por colinas.
 
-
+---
 
 ## CRÉDITOS
 
-Este modelo intenta mostrar el comportamiento del Algoritmo de Enjambre de Camaleones aplicado a un problema de optimización en NetLogo 3D.
+Este modelo muestra el comportamiento del Algoritmo de Enjambre de Camaleones aplicado a problemas de optimización en NetLogo 3D.
 
-Es parte del proyecto Trabajo de Fin de Grado de Raul Caubera Jimenez, supervisado por Rocio Romero Zaliz en la Universidad de Granada, UGR.
+Es parte del Trabajo de Fin de Grado de **Raul Caubera Jimenez**, supervisado por **Rocio Romero Zaliz** en la **Universidad de Granada, UGR**.
 
 El desarrollo se ha realizado tomando como referencia modelos previos de optimización bioinspirada en NetLogo y adaptando el algoritmo CSA a un entorno tridimensional con visualización del espacio de búsqueda.
 
@@ -613,12 +1017,12 @@ https://creativecommons.org/licenses/by-nc-sa/4.0/
 
 ![CC BY-NC-SA 4.0](https://licensebuttons.net/l/by-nc-sa/3.0/88x31.png)
 
-
+---
 
 ## REFERENCIAS
 
-Malik, N., Mohideen, E. R., Ali, L., Faheem, M., y otros autores. Chameleon Swarm Algorithm: A Bio-Inspired Optimizer for Solving Engineering Design Problems.
-
+Malik, N., Mohideen, E. R., Ali, L., Faheem, M., y otros autores.  
+*Chameleon Swarm Algorithm: A Bio-Inspired Optimizer for Solving Engineering Design Problems.*
 
 NetLogo 3D. Plataforma de modelado basada en agentes desarrollada por Uri Wilensky, Center for Connected Learning and Computer-Based Modeling, Northwestern University.
 
